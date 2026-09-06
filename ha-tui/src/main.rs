@@ -25,6 +25,7 @@ async fn main() -> Result<()> {
         config.ha_url.clone(),
         config.ha_token.clone(),
         config.insecure_skip_verify,
+        config.import_lovelace,
         event_tx,
         cmd_rx,
     ));
@@ -47,11 +48,19 @@ async fn main() -> Result<()> {
         tokio::select! {
             event = event_rx.recv() => {
                 match event {
-                    Some(WsEvent::Snapshot { states, areas, devices, entities }) => {
+                    Some(WsEvent::Snapshot { states, areas, devices, entities, lovelace_tabs }) => {
                         let registry = Registry::build(areas, devices, entities);
+                        // Manual [[tab]] config wins if present; otherwise use
+                        // the imported Lovelace tabs when there are any;
+                        // otherwise AppState falls back to auto grouping.
+                        let dashboard = if !config.dashboard.is_empty() {
+                            config.dashboard.clone()
+                        } else {
+                            lovelace_tabs
+                        };
                         match &mut app {
                             Some(app) => app.replace_snapshot(states, registry),
-                            None => app = Some(AppState::new(states, registry, config.dashboard.clone())),
+                            None => app = Some(AppState::new(states, registry, dashboard)),
                         }
                     }
                     Some(WsEvent::StateChanged(change)) => {

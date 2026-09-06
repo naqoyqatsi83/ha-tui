@@ -13,12 +13,20 @@ pub struct Config {
     pub insecure_skip_verify: bool,
     /// Explicit dashboard tabs (`[[tab]]` entries), each an ordered list of
     /// entity_ids. When present, this replaces the automatic room/domain
-    /// grouping entirely.
+    /// grouping entirely, and takes precedence over `import_lovelace`.
     #[serde(default, rename = "tab")]
     pub dashboard: Vec<DashboardTab>,
+    /// Import the HA web UI's own default Lovelace dashboard as tabs
+    /// (mirroring its views), instead of ha-tui's own room/domain
+    /// grouping. Ignored when `[[tab]]` entries are present. Falls back to
+    /// the automatic grouping if the instance has no explicit view-based
+    /// dashboard (e.g. it only uses the auto-generated "strategy" one) or
+    /// the fetch fails.
+    #[serde(default)]
+    pub import_lovelace: bool,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 pub struct DashboardTab {
     pub name: String,
     pub entity_ids: Vec<String>,

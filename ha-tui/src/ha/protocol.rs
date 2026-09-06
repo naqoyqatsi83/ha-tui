@@ -105,6 +105,10 @@ pub enum Outgoing {
     DeviceRegistryList { id: u64 },
     #[serde(rename = "config/entity_registry/list")]
     EntityRegistryList { id: u64 },
+    /// Fetches the default Lovelace dashboard's config (views/cards), used
+    /// to mirror the web UI's own dashboard layout as ha-tui's tabs.
+    #[serde(rename = "lovelace/config")]
+    LovelaceConfig { id: u64 },
     #[serde(rename = "call_service")]
     CallService {
         id: u64,

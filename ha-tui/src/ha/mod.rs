@@ -1,4 +1,5 @@
 pub mod client;
+pub mod lovelace;
 pub mod protocol;
 
 pub use client::{as_state_changed, connect_with_backoff, run, Command, HaConnection, WsEvent};

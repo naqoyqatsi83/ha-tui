@@ -161,6 +161,17 @@ impl HaConnection {
         serde_json::from_value(result.unwrap_or(Value::Null)).context("failed to parse entity_registry result")
     }
 
+    /// Fetches the default Lovelace dashboard's raw config (views/cards).
+    /// Left as a raw `Value` since card schemas vary widely by card type
+    /// and are only loosely typed even in HA itself; the caller walks it
+    /// permissively (see `ha::lovelace::extract_tabs`). Errors if the
+    /// instance has no default dashboard the token can read.
+    pub async fn lovelace_config(&mut self) -> Result<Value> {
+        let id = self.next_id();
+        self.send_raw(&Outgoing::LovelaceConfig { id }).await?;
+        Ok(self.await_result(id).await?.unwrap_or(Value::Null))
+    }
+
     /// Subscribes to events of the given type (or all events if `None`).
     /// Returns the subscription's message id (events on this subscription
     /// arrive as `Incoming::Event` with a matching `id`).
@@ -275,6 +286,10 @@ pub enum WsEvent {
         areas: Vec<AreaEntry>,
         devices: Vec<DeviceEntry>,
         entities: Vec<EntityRegistryEntry>,
+        /// Tabs mirroring the HA web UI's own default Lovelace dashboard,
+        /// when `run`'s `import_lovelace` was set and the fetch succeeded
+        /// with at least one usable view. Empty otherwise.
+        lovelace_tabs: Vec<crate::config::DashboardTab>,
     },
     StateChanged(super::protocol::StateChangedData),
     /// A `Command` the app sent (e.g. a toggle from a keypress) came back
@@ -302,6 +317,7 @@ pub async fn run(
     base_url: String,
     token: String,
     insecure_skip_verify: bool,
+    import_lovelace: bool,
     event_tx: tokio::sync::mpsc::UnboundedSender<WsEvent>,
     mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
 ) {
@@ -326,12 +342,27 @@ pub async fn run(
             }
         };
 
+        // Best-effort: a missing/unreadable dashboard just means no tabs to
+        // import, not a reason to fail the whole connection.
+        let lovelace_tabs = if import_lovelace {
+            match conn.lovelace_config().await {
+                Ok(config) => super::lovelace::extract_tabs(&config),
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to fetch lovelace dashboard, falling back to auto grouping");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
         if event_tx
             .send(WsEvent::Snapshot {
                 states,
                 areas,
                 devices,
                 entities,
+                lovelace_tabs,
             })
             .is_err()
         {
