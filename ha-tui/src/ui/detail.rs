@@ -23,19 +23,19 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
         .title_style(Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(theme::ACCENT));
 
-    let points = app.history_points(entity_id);
-    if points.len() < 2 {
+    let Some(series) = app.history_series(entity_id) else {
         let message = Paragraph::new("Not enough history yet - keep the app open a little longer.")
             .style(Style::default().fg(theme::TEXT_DIM))
             .block(block);
         frame.render_widget(message, area);
         return;
-    }
+    };
+    let points = series.points;
 
     let min = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
     let max = points.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
     let (y_min, y_max) = if max > min { (min, max) } else { (min - 1.0, min + 1.0) };
-    let x_max = (points.len() - 1) as f64;
+    let x_max = points.last().map(|p| p.0).unwrap_or(0.0);
 
     let dataset = Dataset::default()
         .marker(symbols::Marker::Braille)
@@ -47,10 +47,10 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
         .block(block)
         .x_axis(
             Axis::default()
-                .title("time")
+                .title("time (UTC)")
                 .style(Style::default().fg(theme::BORDER))
                 .bounds([0.0, x_max])
-                .labels(vec!["oldest".to_string(), "now".to_string()]),
+                .labels(vec![series.start_label, series.end_label]),
         )
         .y_axis(
             Axis::default()

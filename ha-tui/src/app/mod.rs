@@ -20,6 +20,39 @@ pub struct ResolvedCard<'a> {
     pub entities: Vec<&'a Entity>,
 }
 
+/// One recorded value for a graphed entity: `at` is a unix timestamp
+/// (seconds), matching what HA's history API and our own live
+/// `SystemTime::now()` sampling both produce, so historical and
+/// live-appended points share one clock.
+#[derive(Debug, Clone, Copy)]
+struct HistoryPoint {
+    at: f64,
+    value: f64,
+}
+
+/// `AppState::history_series`'s return: chart-ready (elapsed-seconds,
+/// value) points plus real clock labels for the detail popup's time axis.
+pub struct HistorySeries {
+    pub points: Vec<(f64, f64)>,
+    pub start_label: String,
+    pub end_label: String,
+}
+
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// HH:MM in UTC (matching the timestamps themselves, and how the rest of
+/// the app already shows entity timestamps) - deliberately not converted
+/// to a local timezone, which would need knowing the user's offset.
+fn format_clock(unix_secs: f64) -> String {
+    let secs_of_day = (unix_secs as i64).rem_euclid(86400);
+    format!("{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60)
+}
+
 /// How long an optimistic UI update or a status message stays visible
 /// before being cleared automatically (e.g. the service call's HA-side
 /// result never arrived, or the user has had enough time to read it).
@@ -88,7 +121,7 @@ pub struct AppState {
     pending: HashMap<String, Pending>,
     status: Option<(String, Instant)>,
     graph_entity_ids: HashSet<String>,
-    history: HashMap<String, VecDeque<f64>>,
+    history: HashMap<String, VecDeque<HistoryPoint>>,
     /// entity_id -> when its state last changed, for a brief highlight
     /// flash; pruned by `expire_stale` after `FLASH_DURATION`.
     flashes: HashMap<String, Instant>,
@@ -163,8 +196,9 @@ impl AppState {
 
         if self.graph_entity_ids.contains(&entity.entity_id) {
             if let Ok(value) = entity.state.parse::<f64>() {
+                let at = unix_now();
                 let buf = self.history.entry(entity.entity_id.clone()).or_default();
-                buf.push_back(value);
+                buf.push_back(HistoryPoint { at, value });
                 while buf.len() > HISTORY_MAX_POINTS {
                     buf.pop_front();
                 }
@@ -176,12 +210,14 @@ impl AppState {
     }
 
     /// Seeds (or refreshes, e.g. on reconnect) sparkline history buffers
-    /// from a real `history_during_period` fetch - each entity's values
-    /// replaced with the fetched trend, capped to the buffer's window.
-    pub fn apply_history(&mut self, history: HashMap<String, Vec<f64>>) {
-        for (entity_id, values) in history {
-            let start = values.len().saturating_sub(HISTORY_MAX_POINTS);
-            self.history.insert(entity_id, values[start..].iter().copied().collect());
+    /// from a real `history_during_period` fetch (`(unix_timestamp,
+    /// value)` pairs, chronological) - each entity's points replaced with
+    /// the fetched trend, capped to the buffer's window.
+    pub fn apply_history(&mut self, history: HashMap<String, Vec<(f64, f64)>>) {
+        for (entity_id, points) in history {
+            let start = points.len().saturating_sub(HISTORY_MAX_POINTS);
+            let buf = points[start..].iter().map(|&(at, value)| HistoryPoint { at, value }).collect();
+            self.history.insert(entity_id, buf);
         }
     }
 
@@ -197,22 +233,32 @@ impl AppState {
         let Some(buf) = self.history.get(entity_id) else {
             return Vec::new();
         };
-        let min = buf.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = buf.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let min = buf.iter().map(|p| p.value).fold(f64::INFINITY, f64::min);
+        let max = buf.iter().map(|p| p.value).fold(f64::NEG_INFINITY, f64::max);
         if max <= min {
             return buf.iter().map(|_| 50).collect();
         }
-        buf.iter().map(|v| (((v - min) / (max - min)) * 100.0).round() as u64).collect()
+        buf.iter().map(|p| (((p.value - min) / (max - min)) * 100.0).round() as u64).collect()
     }
 
-    /// Raw (index, value) points for `entity_id`'s history, for the
-    /// detail chart - unlike `sparkline_data`, not normalized, since the
-    /// chart draws its own real-valued Y axis.
-    pub fn history_points(&self, entity_id: &str) -> Vec<(f64, f64)> {
-        self.history
-            .get(entity_id)
-            .map(|buf| buf.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect())
-            .unwrap_or_default()
+    /// `entity_id`'s history for the detail chart: real-valued (elapsed
+    /// seconds since the oldest point, value) pairs (unlike
+    /// `sparkline_data`, not normalized - the chart draws its own
+    /// real-valued Y axis), plus HH:MM (UTC) clock labels for the first
+    /// and last point, for a real time axis. `None` if there's fewer than
+    /// two points to plot.
+    pub fn history_series(&self, entity_id: &str) -> Option<HistorySeries> {
+        let buf = self.history.get(entity_id)?;
+        let oldest = buf.front()?.at;
+        let newest = buf.back()?.at;
+        if buf.len() < 2 {
+            return None;
+        }
+        Some(HistorySeries {
+            points: buf.iter().map(|p| (p.at - oldest, p.value)).collect(),
+            start_label: format_clock(oldest),
+            end_label: format_clock(newest),
+        })
     }
 
     /// Whether `entity_id`'s state changed recently enough to still show
@@ -1298,14 +1344,29 @@ mod tests {
     }
 
     #[test]
-    fn history_points_are_index_value_pairs_in_order() {
+    fn history_series_gives_elapsed_time_value_pairs_and_clock_labels() {
         let mut a = app_with_graphed_sensor();
         let mut history = HashMap::new();
-        history.insert("sensor.temp".to_string(), vec![10.0, 20.0, 30.0]);
+        // t=0, t=+30s, t=+90s (2026-01-01T00:00:00Z + offsets), values 10/20/30.
+        let base = 1_767_225_600.0; // 2026-01-01T00:00:00Z
+        history.insert("sensor.temp".to_string(), vec![(base, 10.0), (base + 30.0, 20.0), (base + 90.0, 30.0)]);
         a.apply_history(history);
 
-        assert_eq!(a.history_points("sensor.temp"), vec![(0.0, 10.0), (1.0, 20.0), (2.0, 30.0)]);
-        assert_eq!(a.history_points("sensor.unknown"), vec![]);
+        let series = a.history_series("sensor.temp").expect("should have history");
+        assert_eq!(series.points, vec![(0.0, 10.0), (30.0, 20.0), (90.0, 30.0)]);
+        assert_eq!(series.start_label, "00:00");
+        assert_eq!(series.end_label, "00:01");
+
+        assert!(a.history_series("sensor.unknown").is_none());
+    }
+
+    #[test]
+    fn history_series_is_none_with_fewer_than_two_points() {
+        let mut a = app_with_graphed_sensor();
+        let mut history = HashMap::new();
+        history.insert("sensor.temp".to_string(), vec![(1_767_225_600.0, 10.0)]);
+        a.apply_history(history);
+        assert!(a.history_series("sensor.temp").is_none());
     }
 
     #[test]
@@ -1355,7 +1416,7 @@ mod tests {
     fn apply_history_seeds_the_sparkline_buffer() {
         let mut a = app_with_graphed_sensor();
         let mut history = HashMap::new();
-        history.insert("sensor.temp".to_string(), vec![10.0, 20.0, 30.0]);
+        history.insert("sensor.temp".to_string(), vec![(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)]);
         a.apply_history(history);
 
         let data = a.sparkline_data("sensor.temp");
