@@ -15,3 +15,6 @@ pub const UNAVAILABLE: Color = Color::Rgb(110, 100, 90);
 pub const ERROR: Color = Color::Rgb(210, 120, 100);
 pub const HIGHLIGHT_BG: Color = Color::Rgb(224, 175, 92);
 pub const HIGHLIGHT_FG: Color = Color::Rgb(30, 26, 20);
+/// Subtle background tint for the whole selected panel, so it reads as
+/// "focused" even before you look at which row is highlighted inside it.
+pub const PANEL_SELECTED_BG: Color = Color::Rgb(46, 40, 30);

@@ -307,11 +307,12 @@ pub enum WsEvent {
         /// when `run`'s `import_lovelace` was set and the fetch succeeded
         /// with at least one usable view. Empty otherwise.
         lovelace_tabs: Vec<crate::config::DashboardTab>,
-        /// Recent numeric history (chronological) for entities flagged
-        /// `graph_entity_ids` in `lovelace_tabs`, seeding their sparklines
-        /// with a real trend instead of starting flat. Empty entries for
-        /// entities whose history couldn't be fetched or parsed.
-        history: std::collections::HashMap<String, Vec<f64>>,
+        /// Recent (unix timestamp, value) history, chronological, for
+        /// entities flagged `graph_entity_ids` in `lovelace_tabs`, seeding
+        /// their sparklines/detail charts with a real trend and real time
+        /// axis instead of starting flat. Empty entries for entities
+        /// whose history couldn't be fetched or parsed.
+        history: std::collections::HashMap<String, Vec<(f64, f64)>>,
     },
     StateChanged(super::protocol::StateChangedData),
     /// A `Command` the app sent (e.g. a toggle from a keypress) came back
@@ -472,9 +473,10 @@ fn graph_entity_ids(tabs: &[crate::config::DashboardTab]) -> Vec<String> {
 }
 
 /// Parses a `history_during_period` (`minimal_response`) result - `{entity_id:
-/// [{"s": state, "lu": unix_ts}, ...]}` - into numeric values in
-/// chronological order (as returned), skipping non-numeric states.
-fn parse_history(raw: &Value) -> std::collections::HashMap<String, Vec<f64>> {
+/// [{"s": state, "lu": unix_ts}, ...]}` - into (timestamp, value) pairs in
+/// chronological order (as returned), skipping points with a non-numeric
+/// state or a missing timestamp.
+fn parse_history(raw: &Value) -> std::collections::HashMap<String, Vec<(f64, f64)>> {
     let Value::Object(map) = raw else {
         return std::collections::HashMap::new();
     };
@@ -485,7 +487,11 @@ fn parse_history(raw: &Value) -> std::collections::HashMap<String, Vec<f64>> {
                 .map(|points| {
                     points
                         .iter()
-                        .filter_map(|p| p.get("s").and_then(Value::as_str)?.parse::<f64>().ok())
+                        .filter_map(|p| {
+                            let value = p.get("s").and_then(Value::as_str)?.parse::<f64>().ok()?;
+                            let at = p.get("lu").and_then(Value::as_f64)?;
+                            Some((at, value))
+                        })
                         .collect()
                 })
                 .unwrap_or_default();

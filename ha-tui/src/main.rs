@@ -96,6 +96,9 @@ async fn main() -> Result<()> {
                 if app.show_help {
                     // Any key dismisses the help overlay.
                     app.close_help();
+                } else if app.detail_entity().is_some() {
+                    // Any key dismisses the detail chart popup.
+                    app.close_detail();
                 } else if app.is_filter_editing() {
                     match FilterAction::from_key(key) {
                         Some(FilterAction::Push(c)) => app.filter_push_char(c),
@@ -105,10 +108,17 @@ async fn main() -> Result<()> {
                         None => dirty = false,
                     }
                 } else {
+                    // Column count must match what the card grid actually
+                    // rendered (a terminal-width-dependent layout detail
+                    // AppState doesn't otherwise track) so left/right and
+                    // the up/down panel-jump land on the right neighbor.
+                    let columns = ui::cards::columns_for(tui.size().map(|s| s.width).unwrap_or(80), app.visible_cards().len());
                     match Action::from_key(key) {
                         Some(Action::Quit) => break,
-                        Some(Action::MoveUp) => app.move_up(),
-                        Some(Action::MoveDown) => app.move_down(),
+                        Some(Action::MoveUp) => app.move_up(columns),
+                        Some(Action::MoveDown) => app.move_down(columns),
+                        Some(Action::MoveLeft) => app.move_left(columns),
+                        Some(Action::MoveRight) => app.move_right(columns),
                         Some(Action::NextGroup) => app.next_group(),
                         Some(Action::PrevGroup) => app.prev_group(),
                         Some(Action::StartFilter) => app.start_filter(),
@@ -120,10 +130,22 @@ async fn main() -> Result<()> {
                             }
                         }
                         Some(Action::ShowHelp) => app.toggle_help(),
-                        Some(Action::Toggle) => match app.toggle_selected() {
-                            Some(cmd) => { let _ = cmd_tx.send(cmd); }
-                            None => dirty = false,
-                        },
+                        Some(Action::Toggle) => {
+                            // Enter on a graphed row (a sensor with
+                            // history) opens its detail chart instead of
+                            // trying to toggle it - toggle_selected()
+                            // already no-ops for non-light/switch domains,
+                            // but this shows something useful instead.
+                            let graphed = app.selected_entity().is_some_and(|e| app.is_graphed(&e.entity_id));
+                            if graphed {
+                                app.open_detail();
+                            } else {
+                                match app.toggle_selected() {
+                                    Some(cmd) => { let _ = cmd_tx.send(cmd); }
+                                    None => dirty = false,
+                                }
+                            }
+                        }
                         Some(Action::Increase) => match app.adjust_selected(1) {
                             Some(cmd) => { let _ = cmd_tx.send(cmd); }
                             None => dirty = false,
@@ -141,6 +163,17 @@ async fn main() -> Result<()> {
                     Some(app) => app.expire_stale(),
                     None => false,
                 };
+            }
+            // Paces the tab-switch expand animation (~60fps) while one is
+            // running; resolves and stays pending forever otherwise, so an
+            // idle app never wakes up for this on its own.
+            _ = async {
+                match app.as_ref().and_then(AppState::next_animation_delay) {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                dirty = true;
             }
         }
 

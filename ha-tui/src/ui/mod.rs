@@ -1,4 +1,5 @@
 pub mod cards;
+pub mod detail;
 pub mod help;
 pub mod tabs;
 pub mod theme;
@@ -12,7 +13,7 @@ use ratatui::Frame;
 use crate::app::AppState;
 
 const HELP_LINE: &str =
-    "j/k: move   Tab/Shift+Tab: switch tab   Enter/Space: toggle   +/-: adjust   /: search   ?: help   q: quit";
+    "hjkl/arrows: move   Tab/Shift+Tab: switch tab   Enter/Space: toggle   +/-: adjust   /: search   ?: help   q: quit";
 
 pub fn draw(frame: &mut Frame, app: &AppState) {
     let outer = Layout::default()
@@ -41,7 +42,9 @@ pub fn draw(frame: &mut Frame, app: &AppState) {
     };
     frame.render_widget(status_line, inner);
 
-    if app.show_help {
+    if let Some(entity_id) = app.detail_entity() {
+        detail::render(frame, app, entity_id);
+    } else if app.show_help {
         help::render(frame);
     }
 }

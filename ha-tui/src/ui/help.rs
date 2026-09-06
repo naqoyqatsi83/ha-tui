@@ -6,11 +6,13 @@ use ratatui::Frame;
 use super::theme;
 
 const LINES: &[&str] = &[
-    "j / down       move down",
-    "k / up         move up",
+    "j / down       move down (panel above/below at the edge)",
+    "k / up         move up (panel above/below at the edge)",
+    "h / left       switch to the panel on the left",
+    "l / right      switch to the panel on the right",
     "Tab            next tab",
     "Shift+Tab      previous tab",
-    "Enter / Space  toggle light or switch",
+    "Enter / Space  toggle light or switch (opens the history chart on a graphed row)",
     "+ / =          increase brightness or target temperature",
     "-              decrease brightness or target temperature",
     "/              search entities by name",

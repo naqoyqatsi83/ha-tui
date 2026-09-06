@@ -8,6 +8,10 @@ pub enum Action {
     Quit,
     MoveUp,
     MoveDown,
+    /// Switch to the panel to the left, same grid row.
+    MoveLeft,
+    /// Switch to the panel to the right, same grid row.
+    MoveRight,
     NextGroup,
     PrevGroup,
     /// Enter/Space on a light or switch row: call its `toggle` service.
@@ -35,6 +39,8 @@ impl Action {
             KeyCode::Char('q') => Some(Action::Quit),
             KeyCode::Up | KeyCode::Char('k') => Some(Action::MoveUp),
             KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
+            KeyCode::Left | KeyCode::Char('h') => Some(Action::MoveLeft),
+            KeyCode::Right | KeyCode::Char('l') => Some(Action::MoveRight),
             KeyCode::Tab => Some(Action::NextGroup),
             KeyCode::BackTab => Some(Action::PrevGroup),
             KeyCode::Enter | KeyCode::Char(' ') => Some(Action::Toggle),
@@ -92,6 +98,10 @@ mod tests {
         assert_eq!(Action::from_key(press(KeyCode::Char('k'))), Some(Action::MoveUp));
         assert_eq!(Action::from_key(press(KeyCode::Down)), Some(Action::MoveDown));
         assert_eq!(Action::from_key(press(KeyCode::Up)), Some(Action::MoveUp));
+        assert_eq!(Action::from_key(press(KeyCode::Char('h'))), Some(Action::MoveLeft));
+        assert_eq!(Action::from_key(press(KeyCode::Char('l'))), Some(Action::MoveRight));
+        assert_eq!(Action::from_key(press(KeyCode::Left)), Some(Action::MoveLeft));
+        assert_eq!(Action::from_key(press(KeyCode::Right)), Some(Action::MoveRight));
         assert_eq!(Action::from_key(press(KeyCode::Tab)), Some(Action::NextGroup));
         assert_eq!(Action::from_key(press(KeyCode::BackTab)), Some(Action::PrevGroup));
         assert_eq!(Action::from_key(press(KeyCode::Enter)), Some(Action::Toggle));
