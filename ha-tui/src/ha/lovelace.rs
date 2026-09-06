@@ -189,24 +189,29 @@ fn collect_entity_array(items: &[Value], collected: &mut Collected, wants_graph:
 }
 
 /// Best-effort label for a merged card, tried in order:
-/// 1. The container's own `title`/`heading`/`name`.
+/// 1. The container's own `title`/`heading`/`name` (including nested under
+///    `header.title`, how e.g. `custom:apexcharts-card` names itself).
 /// 2. A nested `"type": "heading"` card's `heading` text (how the modern
 ///    sections layout commonly labels a section).
-/// 3. The first leaf card's own `title`/`heading`/`name` found anywhere
-///    inside (e.g. a "grid" of unnamed sensor cards picks up the first
-///    one's name - an approximation, since the card may hold more than
-///    just that one entity, but better than no label at all).
+/// 3. The common leading words shared by every leaf card's own name found
+///    anywhere inside (e.g. a "grid" of "Kitchen temperature" +
+///    "Kitchen humidity" mini cards picks up "Kitchen" - the single-leaf
+///    case naturally reduces to just that leaf's own name).
 fn find_title(value: &Value) -> Option<String> {
     if let Value::Object(map) = value {
         if let Some(title) = own_title(map) {
             return Some(title);
         }
     }
-    find_heading_card(value).or_else(|| find_first_named_leaf(value))
+    find_heading_card(value).or_else(|| common_leaf_title(value))
 }
 
 fn own_title(map: &serde_json::Map<String, Value>) -> Option<String> {
-    ["title", "heading", "name"].iter().find_map(|key| map.get(*key).and_then(Value::as_str)).map(str::to_string)
+    ["title", "heading", "name"]
+        .iter()
+        .find_map(|key| map.get(*key).and_then(Value::as_str))
+        .or_else(|| map.get("header").and_then(|h| h.get("title")).and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 fn find_heading_card(value: &Value) -> Option<String> {
@@ -228,24 +233,51 @@ fn find_heading_card(value: &Value) -> Option<String> {
     map.get("card").and_then(find_heading_card)
 }
 
-fn find_first_named_leaf(value: &Value) -> Option<String> {
-    let Value::Object(map) = value else { return None };
+/// Every leaf card's own name found anywhere inside `value`, reduced to
+/// the leading words they all share ("Kitchen temperature" + "Kitchen
+/// humidity" -> "Kitchen"). A single leaf's name passes through unchanged;
+/// no common leading word at all (or no named leaves) gives `None`.
+fn common_leaf_title(value: &Value) -> Option<String> {
+    let mut names = Vec::new();
+    collect_leaf_names(value, &mut names);
+    common_word_prefix(&names)
+}
+
+fn collect_leaf_names(value: &Value, out: &mut Vec<String>) {
+    let Value::Object(map) = value else { return };
     let has_entities = map.contains_key("entity") || map.contains_key("entities") || map.contains_key("series");
     if has_entities {
         if let Some(title) = own_title(map) {
-            return Some(title);
+            out.push(title);
         }
     }
     for key in ["cards", "sections"] {
         if let Some(Value::Array(items)) = map.get(key) {
             for item in items {
-                if let Some(t) = find_first_named_leaf(item) {
-                    return Some(t);
-                }
+                collect_leaf_names(item, out);
             }
         }
     }
-    map.get("card").and_then(find_first_named_leaf)
+    if let Some(card) = map.get("card") {
+        collect_leaf_names(card, out);
+    }
+}
+
+fn common_word_prefix(names: &[String]) -> Option<String> {
+    let word_lists: Vec<Vec<&str>> = names.iter().map(|n| n.split_whitespace().collect()).collect();
+    let min_len = word_lists.iter().map(Vec::len).min()?;
+
+    let mut common = Vec::new();
+    for i in 0..min_len {
+        let word = word_lists[0][i];
+        if word_lists.iter().all(|words| words[i] == word) {
+            common.push(word);
+        } else {
+            break;
+        }
+    }
+
+    (!common.is_empty()).then(|| common.join(" "))
 }
 
 #[cfg(test)]
@@ -329,8 +361,48 @@ mod tests {
         });
         let tabs = extract_tabs(&config);
         assert_eq!(tabs[0].cards.len(), 1);
-        assert_eq!(tabs[0].cards[0].title.as_deref(), Some("Kitchen temperature"));
+        // Common leading words across the merged leaves' own names, not
+        // just the first one's full name - "Kitchen", not "Kitchen
+        // temperature" (misleading once the card also shows humidity).
+        assert_eq!(tabs[0].cards[0].title.as_deref(), Some("Kitchen"));
         assert_eq!(tabs[0].cards[0].entity_ids, vec!["sensor.kitchen_temp", "sensor.kitchen_humidity"]);
+    }
+
+    #[test]
+    fn leaves_with_no_common_leading_word_leave_the_card_untitled() {
+        let config = json!({
+            "views": [{
+                "title": "Home",
+                "cards": [{
+                    "type": "grid",
+                    "cards": [
+                        {"type": "sensor", "name": "Kitchen temperature", "entity": "sensor.a"},
+                        {"type": "sensor", "name": "Living room humidity", "entity": "sensor.b"}
+                    ]
+                }]
+            }]
+        });
+        let tabs = extract_tabs(&config);
+        assert_eq!(tabs[0].cards[0].title, None);
+    }
+
+    #[test]
+    fn a_card_title_nested_under_header_is_found() {
+        // How custom:apexcharts-card names itself - a plain top-level
+        // "title"/"heading"/"name" check misses this entirely.
+        let config = json!({
+            "views": [{
+                "title": "Home Detailed",
+                "cards": [{
+                    "type": "custom:apexcharts-card",
+                    "header": { "show": true, "title": "Kitchen" },
+                    "series": [{"entity": "sensor.temp"}, {"entity": "sensor.humidity"}, {"entity": "sensor.battery"}]
+                }]
+            }]
+        });
+        let tabs = extract_tabs(&config);
+        assert_eq!(tabs[0].cards[0].title.as_deref(), Some("Kitchen"));
+        assert_eq!(tabs[0].cards[0].entity_ids, vec!["sensor.temp", "sensor.humidity", "sensor.battery"]);
     }
 
     #[test]
