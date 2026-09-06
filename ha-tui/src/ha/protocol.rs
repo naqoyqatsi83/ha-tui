@@ -74,6 +74,12 @@ pub enum Outgoing {
     },
     #[serde(rename = "get_states")]
     GetStates { id: u64 },
+    #[serde(rename = "config/area_registry/list")]
+    AreaRegistryList { id: u64 },
+    #[serde(rename = "config/device_registry/list")]
+    DeviceRegistryList { id: u64 },
+    #[serde(rename = "config/entity_registry/list")]
+    EntityRegistryList { id: u64 },
     #[serde(rename = "call_service")]
     CallService {
         id: u64,

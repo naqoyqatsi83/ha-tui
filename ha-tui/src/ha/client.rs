@@ -110,6 +110,28 @@ impl HaConnection {
         Ok(states)
     }
 
+    /// Fetches the area registry (rooms/areas configured in HA).
+    pub async fn area_registry(&mut self) -> Result<Value> {
+        let id = self.next_id();
+        self.send_raw(&Outgoing::AreaRegistryList { id }).await?;
+        Ok(self.await_result(id).await?.unwrap_or(Value::Null))
+    }
+
+    /// Fetches the device registry (used to resolve an entity's area via
+    /// its device, when the entity itself has no direct area assignment).
+    pub async fn device_registry(&mut self) -> Result<Value> {
+        let id = self.next_id();
+        self.send_raw(&Outgoing::DeviceRegistryList { id }).await?;
+        Ok(self.await_result(id).await?.unwrap_or(Value::Null))
+    }
+
+    /// Fetches the entity registry (entity -> device/area linkage).
+    pub async fn entity_registry(&mut self) -> Result<Value> {
+        let id = self.next_id();
+        self.send_raw(&Outgoing::EntityRegistryList { id }).await?;
+        Ok(self.await_result(id).await?.unwrap_or(Value::Null))
+    }
+
     /// Subscribes to events of the given type (or all events if `None`).
     /// Returns the subscription's message id (events on this subscription
     /// arrive as `Incoming::Event` with a matching `id`).
