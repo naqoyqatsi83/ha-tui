@@ -1,7 +1,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 
-/// User-input intents, decoupled from the raw crossterm key so the render
-/// loop's `match` doesn't need to know about keybindings.
+/// User-input intents for normal (non-filter-editing) mode, decoupled from
+/// the raw crossterm key so the render loop's `match` doesn't need to know
+/// about keybindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Quit,
@@ -15,6 +16,12 @@ pub enum Action {
     Increase,
     /// `-`: light -> brightness down a step, climate -> target temp down a step.
     Decrease,
+    /// `/`: open the filter/search input.
+    StartFilter,
+    /// Esc: clear an active (confirmed) filter, if any.
+    ClearFilter,
+    /// `?`: toggle the help overlay.
+    ShowHelp,
 }
 
 impl Action {
@@ -33,6 +40,37 @@ impl Action {
             KeyCode::Enter | KeyCode::Char(' ') => Some(Action::Toggle),
             KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::Increase),
             KeyCode::Char('-') => Some(Action::Decrease),
+            KeyCode::Char('/') => Some(Action::StartFilter),
+            KeyCode::Esc => Some(Action::ClearFilter),
+            KeyCode::Char('?') => Some(Action::ShowHelp),
+            _ => None,
+        }
+    }
+}
+
+/// Key interpretation while the filter input has focus (after `/`, before
+/// Enter/Esc) - every printable character is query text here, not a
+/// keybinding, so this is deliberately a separate mapping from [`Action`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterAction {
+    Push(char),
+    Backspace,
+    /// Enter: stop editing, keep the filter applied.
+    Confirm,
+    /// Esc: clear the filter entirely.
+    Cancel,
+}
+
+impl FilterAction {
+    pub fn from_key(key: KeyEvent) -> Option<FilterAction> {
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+        match key.code {
+            KeyCode::Char(c) => Some(FilterAction::Push(c)),
+            KeyCode::Backspace => Some(FilterAction::Backspace),
+            KeyCode::Enter => Some(FilterAction::Confirm),
+            KeyCode::Esc => Some(FilterAction::Cancel),
             _ => None,
         }
     }
@@ -61,6 +99,9 @@ mod tests {
         assert_eq!(Action::from_key(press(KeyCode::Char('+'))), Some(Action::Increase));
         assert_eq!(Action::from_key(press(KeyCode::Char('='))), Some(Action::Increase));
         assert_eq!(Action::from_key(press(KeyCode::Char('-'))), Some(Action::Decrease));
+        assert_eq!(Action::from_key(press(KeyCode::Char('/'))), Some(Action::StartFilter));
+        assert_eq!(Action::from_key(press(KeyCode::Esc)), Some(Action::ClearFilter));
+        assert_eq!(Action::from_key(press(KeyCode::Char('?'))), Some(Action::ShowHelp));
     }
 
     #[test]
@@ -69,5 +110,14 @@ mod tests {
         let mut release = press(KeyCode::Char('q'));
         release.kind = KeyEventKind::Release;
         assert_eq!(Action::from_key(release), None);
+    }
+
+    #[test]
+    fn filter_action_maps_printable_chars_and_controls() {
+        assert_eq!(FilterAction::from_key(press(KeyCode::Char('a'))), Some(FilterAction::Push('a')));
+        assert_eq!(FilterAction::from_key(press(KeyCode::Char(' '))), Some(FilterAction::Push(' ')));
+        assert_eq!(FilterAction::from_key(press(KeyCode::Backspace)), Some(FilterAction::Backspace));
+        assert_eq!(FilterAction::from_key(press(KeyCode::Enter)), Some(FilterAction::Confirm));
+        assert_eq!(FilterAction::from_key(press(KeyCode::Esc)), Some(FilterAction::Cancel));
     }
 }

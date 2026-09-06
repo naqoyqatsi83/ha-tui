@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     let entities = conn.entity_registry().await?;
 
     let registry = Registry::build(areas, devices, entities);
-    let app = AppState::new(states, registry);
+    let app = AppState::new(states, registry, vec![]);
 
     for (group, entities) in app.grouped() {
         println!("== {group} ({}) ==", entities.len());

@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use ha_tui::app::action::Action;
+use crossterm::event::KeyEvent;
+use ha_tui::app::action::{Action, FilterAction};
 use ha_tui::app::registry::Registry;
 use ha_tui::app::AppState;
 use ha_tui::ha::{Command, WsEvent};
@@ -12,13 +13,13 @@ use tokio::sync::mpsc;
 async fn main() -> Result<()> {
     let _log_guard = logging::init()?;
 
-    let config_path = config::default_config_path()?;
+    let config_path = config::resolve_config_path(std::env::args().skip(1))?;
     let config = config::Config::load(&config_path)?;
     tracing::info!(url = %config.ha_url, "loaded config");
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<WsEvent>();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
-    let (action_tx, mut action_rx) = mpsc::unbounded_channel::<Action>();
+    let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyEvent>();
 
     tokio::spawn(ha::run(
         config.ha_url.clone(),
@@ -27,7 +28,7 @@ async fn main() -> Result<()> {
         event_tx,
         cmd_rx,
     ));
-    input::spawn(action_tx);
+    input::spawn(key_tx);
 
     let (_guard, mut tui) = terminal::TerminalGuard::init()?;
 
@@ -50,7 +51,7 @@ async fn main() -> Result<()> {
                         let registry = Registry::build(areas, devices, entities);
                         match &mut app {
                             Some(app) => app.replace_snapshot(states, registry),
-                            None => app = Some(AppState::new(states, registry)),
+                            None => app = Some(AppState::new(states, registry, config.dashboard.clone())),
                         }
                     }
                     Some(WsEvent::StateChanged(change)) => {
@@ -69,31 +70,52 @@ async fn main() -> Result<()> {
                     None => break, // WS task ended (shouldn't happen; it retries forever)
                 }
             }
-            action = action_rx.recv() => {
-                match (&mut app, action) {
-                    (_, Some(Action::Quit)) | (_, None) => break,
-                    (None, _) => dirty = false, // no snapshot yet; ignore input
-                    (Some(app), Some(Action::MoveUp)) => app.move_up(),
-                    (Some(app), Some(Action::MoveDown)) => app.move_down(),
-                    (Some(app), Some(Action::NextGroup)) => app.next_group(),
-                    (Some(app), Some(Action::PrevGroup)) => app.prev_group(),
-                    (Some(app), Some(Action::Toggle)) => {
-                        match app.toggle_selected() {
-                            Some(cmd) => { let _ = cmd_tx.send(cmd); }
-                            None => dirty = false,
-                        }
+            key = key_rx.recv() => {
+                let Some(key) = key else { break };
+                let Some(app) = &mut app else {
+                    continue; // no snapshot yet; ignore input, nothing to redraw
+                };
+
+                if app.show_help {
+                    // Any key dismisses the help overlay.
+                    app.close_help();
+                } else if app.is_filter_editing() {
+                    match FilterAction::from_key(key) {
+                        Some(FilterAction::Push(c)) => app.filter_push_char(c),
+                        Some(FilterAction::Backspace) => app.filter_backspace(),
+                        Some(FilterAction::Confirm) => app.confirm_filter(),
+                        Some(FilterAction::Cancel) => app.cancel_filter(),
+                        None => dirty = false,
                     }
-                    (Some(app), Some(Action::Increase)) => {
-                        match app.adjust_selected(1) {
+                } else {
+                    match Action::from_key(key) {
+                        Some(Action::Quit) => break,
+                        Some(Action::MoveUp) => app.move_up(),
+                        Some(Action::MoveDown) => app.move_down(),
+                        Some(Action::NextGroup) => app.next_group(),
+                        Some(Action::PrevGroup) => app.prev_group(),
+                        Some(Action::StartFilter) => app.start_filter(),
+                        Some(Action::ClearFilter) => {
+                            if app.is_filtering() {
+                                app.cancel_filter();
+                            } else {
+                                dirty = false;
+                            }
+                        }
+                        Some(Action::ShowHelp) => app.toggle_help(),
+                        Some(Action::Toggle) => match app.toggle_selected() {
                             Some(cmd) => { let _ = cmd_tx.send(cmd); }
                             None => dirty = false,
-                        }
-                    }
-                    (Some(app), Some(Action::Decrease)) => {
-                        match app.adjust_selected(-1) {
+                        },
+                        Some(Action::Increase) => match app.adjust_selected(1) {
                             Some(cmd) => { let _ = cmd_tx.send(cmd); }
                             None => dirty = false,
-                        }
+                        },
+                        Some(Action::Decrease) => match app.adjust_selected(-1) {
+                            Some(cmd) => { let _ = cmd_tx.send(cmd); }
+                            None => dirty = false,
+                        },
+                        None => dirty = false,
                     }
                 }
             }
