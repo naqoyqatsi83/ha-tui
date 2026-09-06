@@ -363,9 +363,18 @@ impl AppState {
                     let cards = tab
                         .resolved_cards()
                         .into_iter()
-                        .map(|card| ResolvedCard {
-                            title: card.title,
-                            entities: card.entity_ids.iter().filter_map(|id| self.entities.get(id)).collect(),
+                        .map(|card| {
+                            let entities: Vec<&Entity> =
+                                card.entity_ids.iter().filter_map(|id| self.entities.get(id)).collect();
+                            // A card with no label of its own and exactly one
+                            // entity (e.g. a bare weather-forecast card) reads
+                            // as unlabeled even though the dashboard shows
+                            // one - fall back to that entity's own name.
+                            let title = card.title.or_else(|| match entities.as_slice() {
+                                [only] => Some(only.friendly_name().to_string()),
+                                _ => None,
+                            });
+                            ResolvedCard { title, entities }
                         })
                         .collect();
                     (tab.name.clone(), cards)
@@ -891,17 +900,39 @@ mod tests {
             },
             crate::config::DashboardCard {
                 title: None,
-                entity_ids: vec!["sensor.b".into()],
+                entity_ids: vec!["light.b".into(), "sensor.c".into()],
             },
         ];
-        let a = AppState::new(vec![state("light.a", "on"), state("sensor.b", "1")], Registry::default(), vec![tab]);
+        let a = AppState::new(
+            vec![state("light.a", "on"), state("light.b", "on"), state("sensor.c", "1")],
+            Registry::default(),
+            vec![tab],
+        );
 
         let cards = a.visible_cards();
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[0].title.as_deref(), Some("Lights"));
         assert_eq!(cards[0].entities[0].entity_id, "light.a");
+        // Untitled card with more than one entity stays untitled - no
+        // single entity to reasonably fall back to.
         assert_eq!(cards[1].title, None);
-        assert_eq!(cards[1].entities[0].entity_id, "sensor.b");
+    }
+
+    #[test]
+    fn untitled_single_entity_card_falls_back_to_the_entitys_own_name() {
+        let mut tab = DashboardTab::new("Weather", vec![]);
+        tab.cards = vec![crate::config::DashboardCard {
+            title: None,
+            entity_ids: vec!["weather.home".into()],
+        }];
+        let a = AppState::new(
+            vec![state_with_attrs("weather.home", "sunny", json!({ "friendly_name": "Forecast Home" }))],
+            Registry::default(),
+            vec![tab],
+        );
+
+        let cards = a.visible_cards();
+        assert_eq!(cards[0].title.as_deref(), Some("Forecast Home"));
     }
 
     #[test]
