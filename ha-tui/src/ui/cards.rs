@@ -7,10 +7,20 @@ use super::theme;
 use crate::app::entity::Entity;
 use crate::app::{AppState, ResolvedCard};
 
-const TARGET_CARD_WIDTH: u16 = 34;
-const MAX_COLUMNS: usize = 4;
+const TARGET_CARD_WIDTH: u16 = 28;
+const MAX_COLUMNS: usize = 5;
 const MIN_CARD_HEIGHT: u16 = 3;
 const MAX_CARD_HEIGHT: u16 = 12;
+
+/// How many panels the grid currently lays out per row for `width` and
+/// `card_count` panels - shared with `AppState`'s left/right navigation so
+/// they always agree with what's actually on screen.
+pub fn columns_for(width: u16, card_count: usize) -> usize {
+    if card_count == 0 {
+        return 1;
+    }
+    ((width / TARGET_CARD_WIDTH).max(1) as usize).min(MAX_COLUMNS).min(card_count)
+}
 /// Row height (in terminal lines) for an entity: a graphed one gets an
 /// extra line underneath its name/value for the sparkline.
 fn entity_units(app: &AppState, entity: &Entity) -> u16 {
@@ -36,20 +46,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
         return;
     }
 
-    let columns = ((area.width / TARGET_CARD_WIDTH).max(1) as usize).min(MAX_COLUMNS).min(cards.len());
-
-    // Map the flat selection index onto (card_index, row_within_card) so
-    // the right row in the right panel gets the highlight.
-    let selected_flat = app.visible_selected_index();
-    let mut running = 0usize;
-    let mut selected = None;
-    for (i, card) in cards.iter().enumerate() {
-        if selected_flat < running + card.entities.len() {
-            selected = Some((i, selected_flat - running));
-            break;
-        }
-        running += card.entities.len();
-    }
+    let columns = columns_for(area.width, cards.len());
+    let (selected_card, selected_row_idx) = app.selected_position();
 
     let rows: Vec<&[ResolvedCard]> = cards.chunks(columns).collect();
     let row_heights: Vec<u16> = rows
@@ -62,25 +60,44 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
 
     let row_areas = Layout::vertical(row_heights.iter().map(|h| Constraint::Length(*h))).split(area);
 
+    // Panels briefly expand in (top-anchored reveal) right after a tab
+    // switch; ease-out so it settles rather than stopping abruptly.
+    let linear = app.tab_transition_progress();
+    let eased = 1.0 - (1.0 - linear).powi(3);
+
     for (row_idx, row_cards) in rows.iter().enumerate() {
         let col_areas =
             Layout::horizontal(row_cards.iter().map(|_| Constraint::Ratio(1, row_cards.len() as u32))).split(row_areas[row_idx]);
 
         for (col_idx, card) in row_cards.iter().enumerate() {
             let global_idx = row_idx * columns + col_idx;
-            let selected_row = selected.filter(|(i, _)| *i == global_idx).map(|(_, row)| row);
-            render_card(frame, col_areas[col_idx], card, app, selected_row);
+            let selected_row = (global_idx == selected_card).then_some(selected_row_idx);
+            let full = col_areas[col_idx];
+            let height = ((full.height as f32) * eased).round() as u16;
+            if height == 0 {
+                continue;
+            }
+            let area = Rect { height, ..full };
+            render_card(frame, area, card, app, selected_row);
         }
     }
 }
 
 fn render_card(frame: &mut Frame, area: Rect, card: &ResolvedCard, app: &AppState, selected_row: Option<usize>) {
+    let is_selected_panel = selected_row.is_some();
     let title = card.title.clone().unwrap_or_default();
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .title(format!(" {title} "))
         .title_style(Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(if selected_row.is_some() { theme::ACCENT } else { theme::BORDER }));
+        .border_style(Style::default().fg(if is_selected_panel { theme::ACCENT } else { theme::BORDER }));
+    if is_selected_panel {
+        // Tints the whole panel (border + interior) so the focused panel
+        // reads clearly even before spotting which row inside it is lit -
+        // rows rendered on top only set `fg`, so this background shows
+        // through everywhere they don't otherwise highlight.
+        block = block.style(Style::default().bg(theme::PANEL_SELECTED_BG));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

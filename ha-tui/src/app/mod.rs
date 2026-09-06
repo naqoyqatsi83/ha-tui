@@ -29,6 +29,10 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const FLASH_DURATION: Duration = Duration::from_millis(600);
 /// Rolling window length for live-updated sparkline history buffers.
 const HISTORY_MAX_POINTS: usize = 60;
+/// How long a tab switch's panel expand-in animation runs.
+const TAB_TRANSITION_DURATION: Duration = Duration::from_millis(220);
+/// Target animation frame pacing (~60fps) while a transition is running.
+const ANIMATION_FRAME: Duration = Duration::from_millis(16);
 
 /// A locally-applied guess at an entity's next display state, shown until
 /// either a real `state_changed` event confirms it (cleared regardless of
@@ -71,7 +75,10 @@ pub struct AppState {
     pub entities: HashMap<String, Entity>,
     pub registry: Registry,
     pub selected_group: usize,
-    pub selected_entity: usize,
+    /// Which panel (card) is selected within the current tab.
+    pub selected_card: usize,
+    /// Which entity row is selected within `selected_card`.
+    pub selected_row: usize,
     pub show_help: bool,
     dashboard: Vec<DashboardTab>,
     filter: Option<FilterState>,
@@ -82,6 +89,11 @@ pub struct AppState {
     /// entity_id -> when its state last changed, for a brief highlight
     /// flash; pruned by `expire_stale` after `FLASH_DURATION`.
     flashes: HashMap<String, Instant>,
+    /// When the current tab was switched to, for the panels' brief
+    /// expand-in animation. `None` means no animation is (or was ever)
+    /// in progress - `tab_transition_progress` treats that the same as
+    /// "already finished" (fully expanded).
+    tab_transition_started_at: Option<Instant>,
 }
 
 impl AppState {
@@ -96,7 +108,8 @@ impl AppState {
             entities: HashMap::new(),
             registry,
             selected_group: 0,
-            selected_entity: 0,
+            selected_card: 0,
+            selected_row: 0,
             show_help: false,
             dashboard,
             filter: None,
@@ -105,6 +118,7 @@ impl AppState {
             graph_entity_ids,
             history: HashMap::new(),
             flashes: HashMap::new(),
+            tab_transition_started_at: None,
         };
         app.entities = states
             .into_iter()
@@ -516,6 +530,12 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// The selected tab's own cards (ignores any active filter) - the
+    /// grid `selected_card`/`selected_row` navigate over.
+    fn selected_tab_cards(&self) -> Vec<ResolvedCard<'_>> {
+        self.tabs().into_iter().nth(self.selected_group).map(|(_, cards)| cards).unwrap_or_default()
+    }
+
     /// The cards shown in the main panel: a single untitled "Search
     /// results" card while filtering, else the selected tab's cards.
     pub fn visible_cards(&self) -> Vec<ResolvedCard<'_>> {
@@ -525,7 +545,7 @@ impl AppState {
                 entities: self.filtered_entities(),
             }];
         }
-        self.tabs().into_iter().nth(self.selected_group).map(|(_, cards)| cards).unwrap_or_default()
+        self.selected_tab_cards()
     }
 
     /// The entity list currently shown in the main panel: the active
@@ -538,24 +558,26 @@ impl AppState {
         }
     }
 
+    /// (card, row) into `visible_cards()` that's currently selected -
+    /// always `(0, filter.selected)` while filtering, since filtering
+    /// collapses to one flat card.
+    pub fn selected_position(&self) -> (usize, usize) {
+        match &self.filter {
+            Some(f) => (0, f.selected),
+            None => (self.selected_card, self.selected_row),
+        }
+    }
+
     /// The index into `visible_entities()` that's currently selected -
     /// either within the active filter's matches or the selected group.
     pub fn visible_selected_index(&self) -> usize {
-        match &self.filter {
-            Some(f) => f.selected,
-            None => self.selected_entity,
-        }
-    }
-
-    fn set_visible_selected_index(&mut self, index: usize) {
-        match &mut self.filter {
-            Some(f) => f.selected = index,
-            None => self.selected_entity = index,
-        }
+        let (card, row) = self.selected_position();
+        self.visible_cards().iter().take(card).map(|c| c.entities.len()).sum::<usize>() + row
     }
 
     pub fn selected_entity(&self) -> Option<&Entity> {
-        self.visible_entities().into_iter().nth(self.visible_selected_index())
+        let (card, row) = self.selected_position();
+        self.visible_cards().into_iter().nth(card).and_then(|c| c.entities.into_iter().nth(row))
     }
 
     /// No-op while filtering (groups aren't meaningful for a global search).
@@ -564,11 +586,13 @@ impl AppState {
             return;
         }
         let count = self.grouped().len();
-        if count == 0 {
-            return;
+        if count <= 1 {
+            return; // nothing to switch to
         }
         self.selected_group = (self.selected_group + 1) % count;
-        self.selected_entity = 0;
+        self.selected_card = 0;
+        self.selected_row = 0;
+        self.tab_transition_started_at = Some(Instant::now());
     }
 
     pub fn prev_group(&mut self) {
@@ -576,25 +600,129 @@ impl AppState {
             return;
         }
         let count = self.grouped().len();
-        if count == 0 {
-            return;
+        if count <= 1 {
+            return; // nothing to switch to
         }
         self.selected_group = (self.selected_group + count - 1) % count;
-        self.selected_entity = 0;
+        self.selected_card = 0;
+        self.selected_row = 0;
+        self.tab_transition_started_at = Some(Instant::now());
     }
 
-    pub fn move_down(&mut self) {
-        let len = self.visible_entities().len();
-        if len == 0 {
+    /// 0.0 (just switched) to 1.0 (fully expanded / no transition in
+    /// progress) for the current tab's panel expand-in animation.
+    pub fn tab_transition_progress(&self) -> f32 {
+        match self.tab_transition_started_at {
+            Some(start) => {
+                let elapsed = start.elapsed();
+                if elapsed >= TAB_TRANSITION_DURATION {
+                    1.0
+                } else {
+                    elapsed.as_secs_f32() / TAB_TRANSITION_DURATION.as_secs_f32()
+                }
+            }
+            None => 1.0,
+        }
+    }
+
+    /// How long the render loop should wait before the next animation
+    /// frame, or `None` if nothing is animating (in which case it should
+    /// just wait for the next real event instead of ticking).
+    pub fn next_animation_delay(&self) -> Option<Duration> {
+        match self.tab_transition_started_at {
+            Some(start) if start.elapsed() < TAB_TRANSITION_DURATION => Some(ANIMATION_FRAME),
+            _ => None,
+        }
+    }
+
+    /// Moves within the selected panel's rows; at the top row, jumps to
+    /// the bottom row of the panel directly above in the grid (same
+    /// column, per `columns` - however many panels the UI is currently
+    /// laying out per row, since that's a terminal-width-dependent
+    /// rendering detail the app layer doesn't otherwise track).
+    pub fn move_up(&mut self, columns: usize) {
+        if let Some(f) = &mut self.filter {
+            f.selected = f.selected.saturating_sub(1);
             return;
         }
-        let index = self.visible_selected_index();
-        self.set_visible_selected_index((index + 1).min(len - 1));
+        if self.selected_row > 0 {
+            self.selected_row -= 1;
+            return;
+        }
+        let columns = columns.max(1);
+        if self.selected_card < columns {
+            return; // already in the top grid row
+        }
+        let target = self.selected_card - columns;
+        let target_len = self.selected_tab_cards().get(target).map(|c| c.entities.len());
+        if let Some(len) = target_len {
+            self.selected_card = target;
+            self.selected_row = len.saturating_sub(1);
+        }
     }
 
-    pub fn move_up(&mut self) {
-        let index = self.visible_selected_index();
-        self.set_visible_selected_index(index.saturating_sub(1));
+    /// Moves within the selected panel's rows; at the bottom (visible) row,
+    /// jumps to the top row of the panel directly below in the grid.
+    pub fn move_down(&mut self, columns: usize) {
+        if self.filter.is_some() {
+            let len = self.filtered_entities().len();
+            if let Some(f) = &mut self.filter {
+                if len > 0 {
+                    f.selected = (f.selected + 1).min(len - 1);
+                }
+            }
+            return;
+        }
+        let cards = self.selected_tab_cards();
+        let Some(current_len) = cards.get(self.selected_card).map(|c| c.entities.len()) else {
+            return;
+        };
+        if self.selected_row + 1 < current_len {
+            self.selected_row += 1;
+            return;
+        }
+        let target = self.selected_card + columns.max(1);
+        if target < cards.len() {
+            self.selected_card = target;
+            self.selected_row = 0;
+        }
+    }
+
+    /// Switches to the panel immediately to the left, same grid row.
+    /// No-op while filtering (a search's results are a single flat card).
+    pub fn move_left(&mut self, columns: usize) {
+        if self.filter.is_some() || columns <= 1 {
+            return;
+        }
+        let col = self.selected_card % columns;
+        if col == 0 {
+            return;
+        }
+        self.select_card(self.selected_card - 1);
+    }
+
+    /// Switches to the panel immediately to the right, same grid row.
+    pub fn move_right(&mut self, columns: usize) {
+        if self.filter.is_some() || columns <= 1 {
+            return;
+        }
+        let card_count = self.selected_tab_cards().len();
+        let col = self.selected_card % columns;
+        let row_start = self.selected_card - col;
+        let row_end = (row_start + columns).min(card_count);
+        let target = self.selected_card + 1;
+        if target < row_end {
+            self.select_card(target);
+        }
+    }
+
+    /// Selects `card`, keeping the same row index where it still fits.
+    fn select_card(&mut self, card: usize) {
+        let len = self.selected_tab_cards().get(card).map(|c| c.entities.len());
+        if let Some(len) = len {
+            self.selected_card = card;
+            self.selected_row = self.selected_row.min(len.saturating_sub(1));
+        }
     }
 
     /// Keeps selection in bounds after the entity map or filter changes
@@ -617,22 +745,28 @@ impl AppState {
             return;
         }
 
-        let group_lens: Vec<usize> = self.grouped().into_iter().map(|(_, entities)| entities.len()).collect();
-        let group_count = group_lens.len();
-        if group_count == 0 {
-            self.selected_group = 0;
-            self.selected_entity = 0;
-            return;
-        }
-        if self.selected_group >= group_count {
-            self.selected_group = group_count - 1;
-        }
-        let entity_count = group_lens[self.selected_group];
-        if entity_count == 0 {
-            self.selected_entity = 0;
-        } else if self.selected_entity >= entity_count {
-            self.selected_entity = entity_count - 1;
-        }
+        let (group, card, row) = {
+            let tabs = self.tabs();
+            let group_count = tabs.len();
+            if group_count == 0 {
+                (0, 0, 0)
+            } else {
+                let group = self.selected_group.min(group_count - 1);
+                let cards = &tabs[group].1;
+                let card_count = cards.len();
+                if card_count == 0 {
+                    (group, 0, 0)
+                } else {
+                    let card = self.selected_card.min(card_count - 1);
+                    let entity_count = cards[card].entities.len();
+                    let row = if entity_count == 0 { 0 } else { self.selected_row.min(entity_count - 1) };
+                    (group, card, row)
+                }
+            }
+        };
+        self.selected_group = group;
+        self.selected_card = card;
+        self.selected_row = row;
     }
 }
 
@@ -711,10 +845,10 @@ mod tests {
         assert_eq!(a.selected_group_name().as_deref(), Some("light"));
         assert_eq!(a.selected_entity().unwrap().entity_id, "light.a");
 
-        a.move_down();
+        a.move_down(1);
         assert_eq!(a.selected_entity().unwrap().entity_id, "light.b");
 
-        a.move_down(); // already at last entity in group, stays put
+        a.move_down(1); // already at last entity in group, stays put
         assert_eq!(a.selected_entity().unwrap().entity_id, "light.b");
 
         a.next_group();
@@ -730,11 +864,11 @@ mod tests {
     #[test]
     fn selection_clamps_when_selected_entity_disappears() {
         let mut a = app(vec![state("light.a", "on"), state("light.b", "off")], Registry::default());
-        a.move_down();
-        assert_eq!(a.selected_entity, 1);
+        a.move_down(1);
+        assert_eq!(a.selected_row, 1);
 
         a.remove_entity("light.b");
-        assert_eq!(a.selected_entity, 0);
+        assert_eq!(a.selected_row, 0);
         assert_eq!(a.selected_entity().unwrap().entity_id, "light.a");
     }
 
@@ -743,7 +877,7 @@ mod tests {
         let mut a = app(vec![state("light.a", "on")], Registry::default());
         a.remove_entity("light.a");
         assert_eq!(a.selected_group, 0);
-        assert_eq!(a.selected_entity, 0);
+        assert_eq!(a.selected_row, 0);
         assert!(a.selected_entity().is_none());
     }
 
@@ -925,7 +1059,7 @@ mod tests {
         for c in "lamp".chars() {
             a.filter_push_char(c);
         }
-        a.move_down();
+        a.move_down(1);
         assert_eq!(a.selected_entity().unwrap().entity_id, "light.b_lamp");
 
         a.filter_push_char('x'); // no entity matches "lampx"
@@ -963,6 +1097,74 @@ mod tests {
         assert_eq!(cards[0].entities[0].entity_id, "light.a");
         assert_eq!(cards[1].title.as_deref(), Some("Switch"));
         assert_eq!(cards[1].entities[0].entity_id, "switch.b");
+    }
+
+    fn grid_of_four_single_entity_cards() -> AppState {
+        let mut tab = DashboardTab::new("Grid", vec![]);
+        tab.cards = ["a", "b", "c", "d"]
+            .iter()
+            .map(|n| crate::config::DashboardCard {
+                title: Some((*n).to_string()),
+                entity_ids: vec![format!("light.{n}")],
+                ..Default::default()
+            })
+            .collect();
+        AppState::new(
+            vec![
+                state("light.a", "on"),
+                state("light.b", "on"),
+                state("light.c", "on"),
+                state("light.d", "on"),
+            ],
+            Registry::default(),
+            vec![tab],
+        )
+    }
+
+    #[test]
+    fn move_right_and_left_switch_between_panels_in_the_same_grid_row() {
+        // 2x2 grid: [a b] / [c d]
+        let mut a = grid_of_four_single_entity_cards();
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.a");
+
+        a.move_right(2);
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.b");
+
+        // already rightmost in its grid row - no-op
+        a.move_right(2);
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.b");
+
+        a.move_left(2);
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.a");
+
+        // already leftmost - no-op
+        a.move_left(2);
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.a");
+    }
+
+    #[test]
+    fn move_down_and_up_cross_grid_rows_via_the_same_column() {
+        // 2x2 grid: [a b] / [c d]
+        let mut a = grid_of_four_single_entity_cards();
+        a.move_right(2); // -> b (row 0, col 1)
+        a.move_down(2); // -> d (row 1, col 1): same column, one entity each so it jumps straight to the next panel
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.d");
+
+        a.move_up(2); // back up to b
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.b");
+
+        // top row - no panel above, no-op
+        a.move_up(2);
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.b");
+    }
+
+    #[test]
+    fn left_right_are_noops_with_a_single_column() {
+        let mut a = grid_of_four_single_entity_cards();
+        a.move_right(1);
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.a");
+        a.move_left(1);
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.a");
     }
 
     #[test]
@@ -1035,6 +1237,32 @@ mod tests {
         assert!(a.show_help);
         a.close_help();
         assert!(!a.show_help);
+    }
+
+    #[test]
+    fn tab_switch_starts_at_zero_progress_and_animation_delay() {
+        let mut a = app(
+            vec![state("light.a", "on"), state("switch.b", "on")],
+            Registry::default(),
+        );
+        // No transition has happened yet - fully "expanded".
+        assert_eq!(a.tab_transition_progress(), 1.0);
+        assert_eq!(a.next_animation_delay(), None);
+
+        a.next_group();
+        // Real elapsed time since Instant::now(), so a tiny epsilon rather
+        // than exactly 0.0 - still well short of "in progress" (< 1.0) and
+        // still animating.
+        assert!(a.tab_transition_progress() < 0.1);
+        assert_eq!(a.next_animation_delay(), Some(Duration::from_millis(16)));
+    }
+
+    #[test]
+    fn no_tabs_to_switch_between_does_not_start_an_animation() {
+        let mut a = app(vec![state("light.a", "on")], Registry::default());
+        a.next_group(); // only one group - no-op
+        assert_eq!(a.tab_transition_progress(), 1.0);
+        assert_eq!(a.next_animation_delay(), None);
     }
 
     fn app_with_graphed_sensor() -> AppState {

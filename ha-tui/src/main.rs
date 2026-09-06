@@ -105,10 +105,17 @@ async fn main() -> Result<()> {
                         None => dirty = false,
                     }
                 } else {
+                    // Column count must match what the card grid actually
+                    // rendered (a terminal-width-dependent layout detail
+                    // AppState doesn't otherwise track) so left/right and
+                    // the up/down panel-jump land on the right neighbor.
+                    let columns = ui::cards::columns_for(tui.size().map(|s| s.width).unwrap_or(80), app.visible_cards().len());
                     match Action::from_key(key) {
                         Some(Action::Quit) => break,
-                        Some(Action::MoveUp) => app.move_up(),
-                        Some(Action::MoveDown) => app.move_down(),
+                        Some(Action::MoveUp) => app.move_up(columns),
+                        Some(Action::MoveDown) => app.move_down(columns),
+                        Some(Action::MoveLeft) => app.move_left(columns),
+                        Some(Action::MoveRight) => app.move_right(columns),
                         Some(Action::NextGroup) => app.next_group(),
                         Some(Action::PrevGroup) => app.prev_group(),
                         Some(Action::StartFilter) => app.start_filter(),
@@ -141,6 +148,17 @@ async fn main() -> Result<()> {
                     Some(app) => app.expire_stale(),
                     None => false,
                 };
+            }
+            // Paces the tab-switch expand animation (~60fps) while one is
+            // running; resolves and stays pending forever otherwise, so an
+            // idle app never wakes up for this on its own.
+            _ = async {
+                match app.as_ref().and_then(AppState::next_animation_delay) {
+                    Some(delay) => tokio::time::sleep(delay).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                dirty = true;
             }
         }
 

@@ -12,7 +12,7 @@ use ratatui::Frame;
 use crate::app::AppState;
 
 const HELP_LINE: &str =
-    "j/k: move   Tab/Shift+Tab: switch tab   Enter/Space: toggle   +/-: adjust   /: search   ?: help   q: quit";
+    "hjkl/arrows: move   Tab/Shift+Tab: switch tab   Enter/Space: toggle   +/-: adjust   /: search   ?: help   q: quit";
 
 pub fn draw(frame: &mut Frame, app: &AppState) {
     let outer = Layout::default()
