@@ -109,6 +109,16 @@ pub enum Outgoing {
     /// to mirror the web UI's own dashboard layout as ha-tui's tabs.
     #[serde(rename = "lovelace/config")]
     LovelaceConfig { id: u64 },
+    /// Fetches historical states for a set of entities, used to seed
+    /// sparkline graphs with a real trend rather than starting flat.
+    #[serde(rename = "history/history_during_period")]
+    HistoryDuringPeriod {
+        id: u64,
+        start_time: String,
+        entity_ids: Vec<String>,
+        minimal_response: bool,
+        no_attributes: bool,
+    },
     #[serde(rename = "call_service")]
     CallService {
         id: u64,

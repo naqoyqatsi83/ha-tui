@@ -38,11 +38,17 @@ pub struct DashboardTab {
     pub cards: Vec<DashboardCard>,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct DashboardCard {
     #[serde(default)]
     pub title: Option<String>,
     pub entity_ids: Vec<String>,
+    /// Which of `entity_ids` should render as a history sparkline instead
+    /// of plain text - populated automatically from Lovelace import (a
+    /// card with a "graph"/history-graph/chart type); not currently
+    /// settable from manual `[[tab.card]]` config.
+    #[serde(default)]
+    pub graph_entity_ids: Vec<String>,
 }
 
 impl DashboardTab {
@@ -63,6 +69,7 @@ impl DashboardTab {
             vec![DashboardCard {
                 title: None,
                 entity_ids: self.entity_ids.clone(),
+                ..Default::default()
             }]
         } else {
             Vec::new()

@@ -172,6 +172,23 @@ impl HaConnection {
         Ok(self.await_result(id).await?.unwrap_or(Value::Null))
     }
 
+    /// Fetches historical states for `entity_ids` since `start_time` (an
+    /// ISO 8601 timestamp). Left as a raw `Value` (shape: `{entity_id:
+    /// [{"s": state, "lu": unix_timestamp}, ...]}` with `minimal_response`)
+    /// since callers only need the numeric state + timestamp pairs.
+    pub async fn history_during_period(&mut self, entity_ids: Vec<String>, start_time: String) -> Result<Value> {
+        let id = self.next_id();
+        self.send_raw(&Outgoing::HistoryDuringPeriod {
+            id,
+            start_time,
+            entity_ids,
+            minimal_response: true,
+            no_attributes: true,
+        })
+        .await?;
+        Ok(self.await_result(id).await?.unwrap_or(Value::Null))
+    }
+
     /// Subscribes to events of the given type (or all events if `None`).
     /// Returns the subscription's message id (events on this subscription
     /// arrive as `Incoming::Event` with a matching `id`).
@@ -290,6 +307,11 @@ pub enum WsEvent {
         /// when `run`'s `import_lovelace` was set and the fetch succeeded
         /// with at least one usable view. Empty otherwise.
         lovelace_tabs: Vec<crate::config::DashboardTab>,
+        /// Recent numeric history (chronological) for entities flagged
+        /// `graph_entity_ids` in `lovelace_tabs`, seeding their sparklines
+        /// with a real trend instead of starting flat. Empty entries for
+        /// entities whose history couldn't be fetched or parsed.
+        history: std::collections::HashMap<String, Vec<f64>>,
     },
     StateChanged(super::protocol::StateChangedData),
     /// A `Command` the app sent (e.g. a toggle from a keypress) came back
@@ -356,6 +378,36 @@ pub async fn run(
             Vec::new()
         };
 
+        // 6h, not 24h: a dashboard can easily have 100+ graphed entities on
+        // a busy instance, and the sparkline buffer only keeps the last
+        // HISTORY_MAX_POINTS anyway - requesting a full day of
+        // fine-grained history for all of them is both wasted work and,
+        // on a large enough set, enough to blow past tungstenite's 16MB
+        // frame limit outright (measured: 110 entities x 24h = ~17MB,
+        // request error; x 6h = ~4MB, ~2.5s). A capped entity count is a
+        // second line of defense for dashboards with even more of them.
+        const MAX_GRAPH_ENTITIES: usize = 150;
+        let mut graph_ids = graph_entity_ids(&lovelace_tabs);
+        if graph_ids.len() > MAX_GRAPH_ENTITIES {
+            tracing::warn!(
+                requested = graph_ids.len(),
+                cap = MAX_GRAPH_ENTITIES,
+                "too many graphed entities for one history fetch, truncating"
+            );
+            graph_ids.truncate(MAX_GRAPH_ENTITIES);
+        }
+        let history = if graph_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            match conn.history_during_period(graph_ids, hours_ago_iso8601(6)).await {
+                Ok(raw) => parse_history(&raw),
+                Err(err) => {
+                    tracing::warn!(error = %err, "failed to fetch sensor history, graphs will start empty");
+                    std::collections::HashMap::new()
+                }
+            }
+        };
+
         if event_tx
             .send(WsEvent::Snapshot {
                 states,
@@ -363,6 +415,7 @@ pub async fn run(
                 devices,
                 entities,
                 lovelace_tabs,
+                history,
             })
             .is_err()
         {
@@ -406,4 +459,68 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Union of every card's `graph_entity_ids` across all tabs, deduplicated.
+fn graph_entity_ids(tabs: &[crate::config::DashboardTab]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    tabs.iter()
+        .flat_map(|tab| tab.resolved_cards())
+        .flat_map(|card| card.graph_entity_ids)
+        .filter(|id| seen.insert(id.clone()))
+        .collect()
+}
+
+/// Parses a `history_during_period` (`minimal_response`) result - `{entity_id:
+/// [{"s": state, "lu": unix_ts}, ...]}` - into numeric values in
+/// chronological order (as returned), skipping non-numeric states.
+fn parse_history(raw: &Value) -> std::collections::HashMap<String, Vec<f64>> {
+    let Value::Object(map) = raw else {
+        return std::collections::HashMap::new();
+    };
+    map.iter()
+        .map(|(entity_id, points)| {
+            let values = points
+                .as_array()
+                .map(|points| {
+                    points
+                        .iter()
+                        .filter_map(|p| p.get("s").and_then(Value::as_str)?.parse::<f64>().ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (entity_id.clone(), values)
+        })
+        .collect()
+}
+
+/// An RFC 3339 UTC timestamp `hours` before now, for `history_during_period`'s
+/// `start_time`. Hand-rolled (Howard Hinnant's civil-from-days algorithm) to
+/// avoid pulling in a date/time crate for one call site.
+fn hours_ago_iso8601(hours: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let ts = now - hours * 3600;
+
+    let days = ts.div_euclid(86400);
+    let secs_of_day = ts.rem_euclid(86400);
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60
+    )
 }

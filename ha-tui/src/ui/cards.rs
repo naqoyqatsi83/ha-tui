@@ -1,6 +1,6 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
 use ratatui::Frame;
 
 use super::theme;
@@ -11,6 +11,19 @@ const TARGET_CARD_WIDTH: u16 = 34;
 const MAX_COLUMNS: usize = 4;
 const MIN_CARD_HEIGHT: u16 = 3;
 const MAX_CARD_HEIGHT: u16 = 12;
+/// Row height (in terminal lines) for an entity: a graphed one gets an
+/// extra line underneath its name/value for the sparkline.
+fn entity_units(app: &AppState, entity: &Entity) -> u16 {
+    if app.is_graphed(&entity.entity_id) {
+        2
+    } else {
+        1
+    }
+}
+
+fn card_units(app: &AppState, card: &ResolvedCard) -> usize {
+    card.entities.iter().map(|e| entity_units(app, e) as usize).sum()
+}
 
 pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     let cards = app.visible_cards();
@@ -42,8 +55,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     let row_heights: Vec<u16> = rows
         .iter()
         .map(|row| {
-            let max_entities = row.iter().map(|c| c.entities.len()).max().unwrap_or(0);
-            (max_entities as u16 + 2).clamp(MIN_CARD_HEIGHT, MAX_CARD_HEIGHT)
+            let max_units = row.iter().map(|c| card_units(app, c)).max().unwrap_or(0);
+            (max_units as u16 + 2).clamp(MIN_CARD_HEIGHT, MAX_CARD_HEIGHT)
         })
         .collect();
 
@@ -68,42 +81,68 @@ fn render_card(frame: &mut Frame, area: Rect, card: &ResolvedCard, app: &AppStat
         .title(format!(" {title} "))
         .title_style(Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))
         .border_style(Style::default().fg(if selected_row.is_some() { theme::ACCENT } else { theme::BORDER }));
-
-    // Capacity is the block's inner height (area minus top+bottom border).
-    let capacity = area.height.saturating_sub(2) as usize;
-    let truncated = capacity > 0 && card.entities.len() > capacity;
-    let visible_count = if truncated { capacity.saturating_sub(1) } else { card.entities.len() };
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     // Give the name column roughly half the card's inner width (minimum
     // enough for short names), state text gets the rest.
-    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_width = inner.width as usize;
     let name_width = (inner_width * 55 / 100).clamp(10, inner_width.saturating_sub(4).max(10));
 
-    let mut items: Vec<ListItem> = card.entities[..visible_count.min(card.entities.len())]
-        .iter()
-        .map(|entity| {
-            let state_display = app.display_state(entity);
-            let text = format!("{:<name_width$} {}", truncate(entity.friendly_name(), name_width), state_display);
-            ListItem::new(text).style(row_style(entity))
-        })
-        .collect();
-    if truncated {
-        let hidden = card.entities.len() - visible_count;
-        items.push(ListItem::new(format!("+{hidden} more")).style(Style::default().fg(theme::TEXT_DIM)));
+    // Fit as many entities as the card's height (in row-units - a graphed
+    // entity takes 2) allows, reserving one line for "+N more" if not all
+    // fit.
+    let capacity = inner.height as usize;
+    let mut visible: Vec<(usize, &Entity, u16)> = Vec::new();
+    let mut used = 0usize;
+    for (i, entity) in card.entities.iter().enumerate() {
+        let units = entity_units(app, entity) as usize;
+        if used + units > capacity {
+            break;
+        }
+        visible.push((i, entity, units as u16));
+        used += units;
     }
-
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(Style::default().bg(theme::HIGHLIGHT_BG).fg(theme::HIGHLIGHT_FG).add_modifier(Modifier::BOLD));
-
-    let mut state = ListState::default();
-    if let Some(row) = selected_row {
-        if row < visible_count {
-            state.select(Some(row));
+    let truncated = visible.len() < card.entities.len();
+    if truncated {
+        while used + 1 > capacity {
+            let Some((_, _, units)) = visible.pop() else { break };
+            used -= units as usize;
         }
     }
 
-    frame.render_stateful_widget(list, area, &mut state);
+    let mut y = inner.y;
+    for (i, entity, units) in &visible {
+        let row_area = Rect { x: inner.x, y, width: inner.width, height: *units };
+        let is_selected = selected_row == Some(*i);
+        render_entity_row(frame, row_area, entity, app, is_selected, name_width);
+        y += units;
+    }
+    if truncated {
+        let hidden = card.entities.len() - visible.len();
+        let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
+        frame.render_widget(Paragraph::new(format!("+{hidden} more")).style(Style::default().fg(theme::TEXT_DIM)), rect);
+    }
+}
+
+fn render_entity_row(frame: &mut Frame, area: Rect, entity: &Entity, app: &AppState, selected: bool, name_width: usize) {
+    let style = if selected {
+        Style::default().bg(theme::HIGHLIGHT_BG).fg(theme::HIGHLIGHT_FG).add_modifier(Modifier::BOLD)
+    } else {
+        row_style(entity, app)
+    };
+
+    let text = format!("{:<name_width$} {}", truncate(entity.friendly_name(), name_width), app.display_state(entity));
+    let text_area = Rect { height: 1, ..area };
+    frame.render_widget(Paragraph::new(text).style(style), text_area);
+
+    if area.height > 1 {
+        let data = app.sparkline_data(&entity.entity_id);
+        let spark_area = Rect { y: area.y + 1, height: area.height - 1, ..area };
+        let spark_style = Style::default().fg(if selected { theme::HIGHLIGHT_BG } else { theme::ACCENT });
+        let sparkline = Sparkline::default().data(&data).style(spark_style);
+        frame.render_widget(sparkline, spark_area);
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -115,20 +154,28 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Color by state: on/active = green, unavailable/unknown = dimmed,
-/// everything else default.
-fn row_style(entity: &Entity) -> Style {
-    if entity.is_unavailable() {
-        return Style::default().fg(theme::UNAVAILABLE);
-    }
-    let is_on = entity
-        .as_light()
-        .map(|l| l.is_on())
-        .or_else(|| entity.as_switch().map(|s| s.is_on()))
-        .unwrap_or(false)
-        || entity.state == "on";
-    if is_on {
-        Style::default().fg(theme::ON)
+/// everything else default. A row whose state changed within the last
+/// `FLASH_DURATION` gets a brief reversed-video flash on top.
+fn row_style(entity: &Entity, app: &AppState) -> Style {
+    let base = if entity.is_unavailable() {
+        Style::default().fg(theme::UNAVAILABLE)
     } else {
-        Style::default().fg(theme::TEXT)
+        let is_on = entity
+            .as_light()
+            .map(|l| l.is_on())
+            .or_else(|| entity.as_switch().map(|s| s.is_on()))
+            .unwrap_or(false)
+            || entity.state == "on";
+        if is_on {
+            Style::default().fg(theme::ON)
+        } else {
+            Style::default().fg(theme::TEXT)
+        }
+    };
+
+    if app.is_recently_changed(&entity.entity_id) {
+        base.add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    } else {
+        base
     }
 }

@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
         tokio::select! {
             event = event_rx.recv() => {
                 match event {
-                    Some(WsEvent::Snapshot { states, areas, devices, entities, lovelace_tabs }) => {
+                    Some(WsEvent::Snapshot { states, areas, devices, entities, lovelace_tabs, history }) => {
                         let registry = Registry::build(areas, devices, entities);
                         // Manual [[tab]] config wins if present; otherwise use
                         // the imported Lovelace tabs when there are any;
@@ -61,6 +61,9 @@ async fn main() -> Result<()> {
                         match &mut app {
                             Some(app) => app.replace_snapshot(states, registry),
                             None => app = Some(AppState::new(states, registry, dashboard)),
+                        }
+                        if let Some(app) = &mut app {
+                            app.apply_history(history);
                         }
                     }
                     Some(WsEvent::StateChanged(change)) => {
@@ -82,7 +85,12 @@ async fn main() -> Result<()> {
             key = key_rx.recv() => {
                 let Some(key) = key else { break };
                 let Some(app) = &mut app else {
-                    continue; // no snapshot yet; ignore input, nothing to redraw
+                    // No snapshot yet (still on the "Connecting..." screen)
+                    // - still quittable, everything else is a no-op.
+                    if Action::from_key(key) == Some(Action::Quit) {
+                        break;
+                    }
+                    continue;
                 };
 
                 if app.show_help {

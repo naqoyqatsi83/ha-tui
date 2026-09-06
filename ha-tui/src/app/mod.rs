@@ -2,7 +2,7 @@ pub mod action;
 pub mod entity;
 pub mod registry;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use entity::Entity;
@@ -25,6 +25,10 @@ pub struct ResolvedCard<'a> {
 /// result never arrived, or the user has had enough time to read it).
 const PENDING_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a row stays flashed after its state changes.
+const FLASH_DURATION: Duration = Duration::from_millis(600);
+/// Rolling window length for live-updated sparkline history buffers.
+const HISTORY_MAX_POINTS: usize = 60;
 
 /// A locally-applied guess at an entity's next display state, shown until
 /// either a real `state_changed` event confirms it (cleared regardless of
@@ -73,10 +77,21 @@ pub struct AppState {
     filter: Option<FilterState>,
     pending: HashMap<String, Pending>,
     status: Option<(String, Instant)>,
+    graph_entity_ids: HashSet<String>,
+    history: HashMap<String, VecDeque<f64>>,
+    /// entity_id -> when its state last changed, for a brief highlight
+    /// flash; pruned by `expire_stale` after `FLASH_DURATION`.
+    flashes: HashMap<String, Instant>,
 }
 
 impl AppState {
     pub fn new(states: Vec<StateObject>, registry: Registry, dashboard: Vec<DashboardTab>) -> Self {
+        let graph_entity_ids = dashboard
+            .iter()
+            .flat_map(DashboardTab::resolved_cards)
+            .flat_map(|card| card.graph_entity_ids)
+            .collect();
+
         let mut app = AppState {
             entities: HashMap::new(),
             registry,
@@ -87,6 +102,9 @@ impl AppState {
             filter: None,
             pending: HashMap::new(),
             status: None,
+            graph_entity_ids,
+            history: HashMap::new(),
+            flashes: HashMap::new(),
         };
         app.entities = states
             .into_iter()
@@ -119,8 +137,60 @@ impl AppState {
     pub fn apply_state(&mut self, state: StateObject) {
         let entity = Entity::from_state(state);
         self.pending.remove(&entity.entity_id);
+
+        let changed = self.entities.get(&entity.entity_id).is_some_and(|old| old.state != entity.state);
+        if changed {
+            self.flashes.insert(entity.entity_id.clone(), Instant::now());
+        }
+
+        if self.graph_entity_ids.contains(&entity.entity_id) {
+            if let Ok(value) = entity.state.parse::<f64>() {
+                let buf = self.history.entry(entity.entity_id.clone()).or_default();
+                buf.push_back(value);
+                while buf.len() > HISTORY_MAX_POINTS {
+                    buf.pop_front();
+                }
+            }
+        }
+
         self.entities.insert(entity.entity_id.clone(), entity);
         self.clamp_selection();
+    }
+
+    /// Seeds (or refreshes, e.g. on reconnect) sparkline history buffers
+    /// from a real `history_during_period` fetch - each entity's values
+    /// replaced with the fetched trend, capped to the buffer's window.
+    pub fn apply_history(&mut self, history: HashMap<String, Vec<f64>>) {
+        for (entity_id, values) in history {
+            let start = values.len().saturating_sub(HISTORY_MAX_POINTS);
+            self.history.insert(entity_id, values[start..].iter().copied().collect());
+        }
+    }
+
+    pub fn is_graphed(&self, entity_id: &str) -> bool {
+        self.graph_entity_ids.contains(entity_id)
+    }
+
+    /// Recent values for `entity_id` normalized to 0-100 for
+    /// `ratatui::widgets::Sparkline` (which only takes `u64`). A flat
+    /// buffer (or fewer than 2 points) renders as a flat mid-height line
+    /// rather than dividing by zero.
+    pub fn sparkline_data(&self, entity_id: &str) -> Vec<u64> {
+        let Some(buf) = self.history.get(entity_id) else {
+            return Vec::new();
+        };
+        let min = buf.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = buf.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        if max <= min {
+            return buf.iter().map(|_| 50).collect();
+        }
+        buf.iter().map(|v| (((v - min) / (max - min)) * 100.0).round() as u64).collect()
+    }
+
+    /// Whether `entity_id`'s state changed recently enough to still show
+    /// the brief highlight flash.
+    pub fn is_recently_changed(&self, entity_id: &str) -> bool {
+        self.flashes.contains_key(entity_id)
     }
 
     /// Removes an entity, e.g. when a `state_changed` event carries a
@@ -310,9 +380,10 @@ impl AppState {
         self.set_status(format!("error: {message}"));
     }
 
-    /// Clears any pending optimistic update / status message that has
-    /// outlived its timeout. Returns whether anything changed, so the
-    /// render loop's periodic tick only redraws when it actually needs to.
+    /// Clears any pending optimistic update / status message / change
+    /// flash that has outlived its timeout. Returns whether anything
+    /// changed, so the render loop's periodic tick only redraws when it
+    /// actually needs to.
     pub fn expire_stale(&mut self) -> bool {
         let before = self.pending.len();
         self.pending.retain(|_, p| p.issued_at.elapsed() < PENDING_TIMEOUT);
@@ -326,7 +397,11 @@ impl AppState {
             _ => false,
         };
 
-        pending_changed || status_changed
+        let before_flashes = self.flashes.len();
+        self.flashes.retain(|_, at| at.elapsed() < FLASH_DURATION);
+        let flashes_changed = self.flashes.len() != before_flashes;
+
+        pending_changed || status_changed || flashes_changed
     }
 
     // ---- grouping / navigation -----------------------------------------
@@ -897,10 +972,12 @@ mod tests {
             crate::config::DashboardCard {
                 title: Some("Lights".into()),
                 entity_ids: vec!["light.a".into()],
+                ..Default::default()
             },
             crate::config::DashboardCard {
                 title: None,
                 entity_ids: vec!["light.b".into(), "sensor.c".into()],
+                ..Default::default()
             },
         ];
         let a = AppState::new(
@@ -924,6 +1001,7 @@ mod tests {
         tab.cards = vec![crate::config::DashboardCard {
             title: None,
             entity_ids: vec!["weather.home".into()],
+            ..Default::default()
         }];
         let a = AppState::new(
             vec![state_with_attrs("weather.home", "sunny", json!({ "friendly_name": "Forecast Home" }))],
@@ -957,5 +1035,62 @@ mod tests {
         assert!(a.show_help);
         a.close_help();
         assert!(!a.show_help);
+    }
+
+    fn app_with_graphed_sensor() -> AppState {
+        let mut tab = DashboardTab::new("Home", vec![]);
+        tab.cards = vec![crate::config::DashboardCard {
+            title: None,
+            entity_ids: vec!["sensor.temp".into()],
+            graph_entity_ids: vec!["sensor.temp".into()],
+        }];
+        AppState::new(vec![state("sensor.temp", "20")], Registry::default(), vec![tab])
+    }
+
+    #[test]
+    fn is_graphed_reflects_the_dashboard_cards_graph_entity_ids() {
+        let a = app_with_graphed_sensor();
+        assert!(a.is_graphed("sensor.temp"));
+        assert!(!a.is_graphed("sensor.other"));
+    }
+
+    #[test]
+    fn apply_history_seeds_the_sparkline_buffer() {
+        let mut a = app_with_graphed_sensor();
+        let mut history = HashMap::new();
+        history.insert("sensor.temp".to_string(), vec![10.0, 20.0, 30.0]);
+        a.apply_history(history);
+
+        let data = a.sparkline_data("sensor.temp");
+        assert_eq!(data, vec![0, 50, 100]); // normalized 10..30 to 0..100
+    }
+
+    #[test]
+    fn sparkline_data_is_empty_for_an_ungraphed_or_unseeded_entity() {
+        let a = app_with_graphed_sensor();
+        assert!(a.sparkline_data("sensor.temp").is_empty()); // no history applied yet
+        assert!(a.sparkline_data("sensor.other").is_empty());
+    }
+
+    #[test]
+    fn live_state_changes_append_to_the_graphed_entitys_history() {
+        let mut a = app_with_graphed_sensor();
+        a.apply_state(state("sensor.temp", "25"));
+        a.apply_state(state("sensor.temp", "30"));
+        // Both numeric updates appended; normalized last point is the max.
+        assert_eq!(a.sparkline_data("sensor.temp"), vec![0, 100]);
+    }
+
+    #[test]
+    fn state_change_flashes_the_entity_briefly() {
+        let mut a = app(vec![state("switch.a", "off")], Registry::default());
+        assert!(!a.is_recently_changed("switch.a"));
+
+        a.apply_state(state("switch.a", "on"));
+        assert!(a.is_recently_changed("switch.a"));
+
+        // Applying the same state again isn't a change, so no new flash.
+        a.apply_state(state("switch.a", "on"));
+        assert!(a.is_recently_changed("switch.a"));
     }
 }

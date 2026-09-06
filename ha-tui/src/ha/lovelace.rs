@@ -74,19 +74,61 @@ pub fn extract_tabs(config: &Value) -> Vec<DashboardTab> {
         .collect()
 }
 
+/// Card types that plot a history graph regardless of a "graph" key -
+/// checked against a card's own `type`, suffix-matched for `custom:*`
+/// third-party chart cards.
+fn type_wants_graph(card_type: &str) -> bool {
+    matches!(card_type, "history-graph" | "sensor-graph")
+        || card_type.ends_with("apexcharts-card")
+        || card_type.ends_with("mini-graph-card")
+}
+
+/// Whether a specific card object itself (not its children) wants a graph:
+/// either its own `type`, or a `"graph"` key set to something other than
+/// "none" (how the built-in mini "sensor" card enables its sparkline).
+fn card_wants_graph(map: &serde_json::Map<String, Value>) -> bool {
+    if let Some(t) = map.get("type").and_then(Value::as_str) {
+        if type_wants_graph(t) {
+            return true;
+        }
+    }
+    matches!(map.get("graph").and_then(Value::as_str), Some(g) if g != "none")
+}
+
+#[derive(Default)]
+struct Collected {
+    entity_ids: Vec<String>,
+    graph_entity_ids: Vec<String>,
+    seen: HashSet<String>,
+}
+
+impl Collected {
+    fn push(&mut self, id: &str, wants_graph: bool) {
+        if id.contains('.') && self.seen.insert(id.to_string()) {
+            self.entity_ids.push(id.to_string());
+            if wants_graph {
+                self.graph_entity_ids.push(id.to_string());
+            }
+        }
+    }
+}
+
 fn single_card_from_badge(item: &Value) -> Option<DashboardCard> {
-    let mut entity_ids = Vec::new();
-    let mut seen = HashSet::new();
+    let mut collected = Collected::default();
     match item {
-        Value::String(id) => push(id, &mut entity_ids, &mut seen),
+        Value::String(id) => collected.push(id, false),
         Value::Object(o) => {
             if let Some(Value::String(id)) = o.get("entity") {
-                push(id, &mut entity_ids, &mut seen);
+                collected.push(id, false);
             }
         }
         _ => {}
     }
-    (!entity_ids.is_empty()).then_some(DashboardCard { title: None, entity_ids })
+    (!collected.entity_ids.is_empty()).then_some(DashboardCard {
+        title: None,
+        entity_ids: collected.entity_ids,
+        graph_entity_ids: collected.graph_entity_ids,
+    })
 }
 
 /// Collects every entity referenced anywhere inside `value` (however
@@ -94,47 +136,51 @@ fn single_card_from_badge(item: &Value) -> Option<DashboardCard> {
 /// find in the subtree. Returns `None` if no entities were found at all
 /// (e.g. a markdown or iframe card).
 fn merge_into_one_card(value: &Value) -> Option<DashboardCard> {
-    let mut entity_ids = Vec::new();
-    let mut seen = HashSet::new();
-    collect_entities(value, &mut entity_ids, &mut seen);
-    if entity_ids.is_empty() {
+    let mut collected = Collected::default();
+    collect_entities(value, &mut collected);
+    if collected.entity_ids.is_empty() {
         return None;
     }
-    Some(DashboardCard { title: find_title(value), entity_ids })
+    Some(DashboardCard {
+        title: find_title(value),
+        entity_ids: collected.entity_ids,
+        graph_entity_ids: collected.graph_entity_ids,
+    })
 }
 
-fn collect_entities(value: &Value, out: &mut Vec<String>, seen: &mut HashSet<String>) {
+fn collect_entities(value: &Value, collected: &mut Collected) {
     let Value::Object(map) = value else { return };
+    let wants_graph = card_wants_graph(map);
 
     if let Some(Value::String(id)) = map.get("entity") {
-        push(id, out, seen);
+        collected.push(id, wants_graph);
     }
     for key in ["entities", "series"] {
         if let Some(Value::Array(items)) = map.get(key) {
-            collect_entity_array(items, out, seen);
+            collect_entity_array(items, collected, wants_graph);
         }
     }
     for key in ["cards", "sections"] {
         if let Some(Value::Array(items)) = map.get(key) {
             for item in items {
-                collect_entities(item, out, seen);
+                collect_entities(item, collected);
             }
         }
     }
     // Used by e.g. "conditional" cards, which wrap a single nested card.
     if let Some(card) = map.get("card") {
-        collect_entities(card, out, seen);
+        collect_entities(card, collected);
     }
 }
 
-fn collect_entity_array(items: &[Value], out: &mut Vec<String>, seen: &mut HashSet<String>) {
+fn collect_entity_array(items: &[Value], collected: &mut Collected, wants_graph: bool) {
     for item in items {
         match item {
             // Legacy entities-card shorthand: a plain entity_id string.
-            Value::String(id) => push(id, out, seen),
+            Value::String(id) => collected.push(id, wants_graph),
             Value::Object(o) => {
                 if let Some(Value::String(id)) = o.get("entity") {
-                    push(id, out, seen);
+                    collected.push(id, wants_graph);
                 }
             }
             _ => {}
@@ -202,14 +248,6 @@ fn find_first_named_leaf(value: &Value) -> Option<String> {
     map.get("card").and_then(find_first_named_leaf)
 }
 
-fn push(candidate: &str, out: &mut Vec<String>, seen: &mut HashSet<String>) {
-    // Cheap sanity check that this looks like an entity_id rather than some
-    // other string field we happened to walk into.
-    if candidate.contains('.') && seen.insert(candidate.to_string()) {
-        out.push(candidate.to_string());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +271,41 @@ mod tests {
         assert_eq!(tabs[0].cards.len(), 1);
         assert_eq!(tabs[0].cards[0].title.as_deref(), Some("Living Room"));
         assert_eq!(tabs[0].cards[0].entity_ids, vec!["light.a", "switch.b"]);
+    }
+
+    #[test]
+    fn sensor_cards_with_a_graph_key_are_flagged_for_sparklines() {
+        let config = json!({
+            "views": [{
+                "title": "Home",
+                "cards": [{
+                    "type": "grid",
+                    "cards": [
+                        {"type": "sensor", "name": "Kitchen temp", "entity": "sensor.temp", "graph": "line"},
+                        {"type": "sensor", "name": "Kitchen humidity", "entity": "sensor.humidity"}
+                    ]
+                }]
+            }]
+        });
+        let tabs = extract_tabs(&config);
+        assert_eq!(tabs[0].cards[0].entity_ids, vec!["sensor.temp", "sensor.humidity"]);
+        assert_eq!(tabs[0].cards[0].graph_entity_ids, vec!["sensor.temp"]);
+    }
+
+    #[test]
+    fn history_graph_and_apexcharts_cards_flag_all_their_entities() {
+        let config = json!({
+            "views": [{
+                "title": "Flood",
+                "cards": [
+                    {"type": "history-graph", "entities": ["binary_sensor.flood"]},
+                    {"type": "custom:apexcharts-card", "series": [{"entity": "sensor.a"}, {"entity": "sensor.b"}]}
+                ]
+            }]
+        });
+        let tabs = extract_tabs(&config);
+        assert_eq!(tabs[0].cards[0].graph_entity_ids, vec!["binary_sensor.flood"]);
+        assert_eq!(tabs[0].cards[1].graph_entity_ids, vec!["sensor.a", "sensor.b"]);
     }
 
     #[test]
