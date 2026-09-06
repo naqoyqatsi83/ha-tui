@@ -19,6 +19,23 @@ ha-tui mirrors your existing Lovelace dashboards straight into your terminal —
 
 No web server, no browser, no polling REST endpoints. Just a single binary and a WebSocket connection.
 
+## Screenshots
+
+<table>
+<tr><td colspan="2">
+
+**Overview** — mirrored Lovelace dashboard, card grid with live states and history sparklines
+<img src="docs/screenshots/overview.png" alt="Overview tab">
+
+</td></tr>
+<tr><td colspan="2">
+
+**Detail popup** — press `Enter` on a card for a full time-axis history chart
+<img src="docs/screenshots/detail.png" alt="Detail popup">
+
+</td></tr>
+</table>
+
 ## Features
 
 - **Lovelace mirroring** — imports your dashboard's views and cards on startup (`import_lovelace = true`), so tabs and card grids match what you already built in HA; falls back to a config-defined layout when disabled
