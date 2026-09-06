@@ -24,8 +24,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 directories = "5"
 
+[profile.release]
+strip = true
+
 [package.metadata.deb]
 copyright = "2026, naqoyqatsi83"
+# Explicit instead of the default "$auto" (dpkg-shlibdeps): shlibdeps can't
+# resolve a foreign-arch (arm64) binary's shared libs from an amd64 host
+# during the cross-compiled Raspberry Pi build. libc6/libgcc-s1 cover the
+# dynamic libs this binary actually links against (libc, libgcc_s, libm,
+# libpthread, libdl, the dynamic linker) on any glibc Debian-family system.
+depends = "libc6, libgcc-s1"
 extended-description = """\
 A terminal UI application that connects to a Home Assistant instance over its \
 WebSocket API, displays entities grouped by room/domain, updates in real time \

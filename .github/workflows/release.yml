@@ -76,7 +76,11 @@ jobs:
         run: cross build --release --target aarch64-unknown-linux-gnu
       - name: Package .deb (arm64)
         working-directory: ha-tui
-        run: cargo deb --target aarch64-unknown-linux-gnu --no-build
+        # --no-strip: the binary is already stripped by `cross build` above
+        # (profile.release.strip=true, run inside the container with the
+        # correct aarch64 toolchain); cargo-deb's own post-build strip runs
+        # on the host and can't parse a foreign-arch ELF.
+        run: cargo deb --target aarch64-unknown-linux-gnu --no-build --no-strip
       - uses: actions/upload-artifact@v4
         with:
           name: linux-arm64-deb
