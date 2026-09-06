@@ -1,13 +1,15 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
+
+use super::theme;
 
 const LINES: &[&str] = &[
     "j / down       move down",
     "k / up         move up",
-    "Tab            next room",
-    "Shift+Tab      previous room",
+    "Tab            next tab",
+    "Shift+Tab      previous tab",
     "Enter / Space  toggle light or switch",
     "+ / =          increase brightness or target temperature",
     "-              decrease brightness or target temperature",
@@ -28,11 +30,12 @@ pub fn render(frame: &mut Frame) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title("Keybindings")
-        .border_style(Style::default().fg(Color::Cyan));
+        .title(" Keybindings ")
+        .title_style(Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))
+        .border_style(Style::default().fg(theme::ACCENT));
 
     let text = LINES.join("\n");
-    let paragraph = Paragraph::new(text).block(block);
+    let paragraph = Paragraph::new(text).style(Style::default().fg(theme::TEXT)).block(block);
     frame.render_widget(paragraph, area);
 }
 

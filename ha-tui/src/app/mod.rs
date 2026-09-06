@@ -12,6 +12,14 @@ use serde_json::json;
 use crate::config::DashboardTab;
 use crate::ha::{Command, StateObject};
 
+/// One dashboard panel: an optional title and the entities it shows, in
+/// order. Mirrors a Lovelace card (or, in auto-grouping mode, one domain's
+/// entities within a room).
+pub struct ResolvedCard<'a> {
+    pub title: Option<String>,
+    pub entities: Vec<&'a Entity>,
+}
+
 /// How long an optimistic UI update or a status message stays visible
 /// before being cleared automatically (e.g. the service call's HA-side
 /// result never arrived, or the user has had enough time to read it).
@@ -25,6 +33,22 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 struct Pending {
     display_state: String,
     issued_at: Instant,
+}
+
+/// "climate" -> "Climate", "binary_sensor" -> "Binary Sensor". Used for
+/// auto-generated card titles (domain names) in the dashboard-style grid.
+fn titleize(domain: &str) -> String {
+    domain
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Live filter/search state: `/` opens it with `editing: true` (raw key
@@ -318,41 +342,77 @@ impl AppState {
         }
     }
 
-    /// Entities grouped into named tabs, in display order. If the config
-    /// defines explicit dashboard tabs, those are used verbatim (in their
-    /// configured order, entity_ids not currently known to HA skipped);
-    /// otherwise entities are grouped by area name where the registry
-    /// knows one, falling back to domain, ordered alphabetically. Groups'
-    /// own entities are always name-sorted (entity_id tie-break: `entities`
-    /// is a HashMap mutated by every incoming state_changed event, so its
-    /// iteration order isn't guaranteed stable between renders, which
-    /// would otherwise let the index-based selection silently drift to a
-    /// different entity between keypresses).
-    pub fn grouped(&self) -> Vec<(String, Vec<&Entity>)> {
+    /// Tabs with their cards, in display order. If the config defines
+    /// explicit dashboard tabs, those are used verbatim (in their
+    /// configured order, entity_ids not currently known to HA skipped) -
+    /// each tab's `resolved_cards()` becomes its panels. Otherwise entities
+    /// are grouped by area name where the registry knows one (falling back
+    /// to domain) as the tab, alphabetically, with one card per domain
+    /// within that tab. A card's own entities are always name-sorted
+    /// (entity_id tie-break: `entities` is a HashMap mutated by every
+    /// incoming state_changed event, so its iteration order isn't
+    /// guaranteed stable between renders, which would otherwise let the
+    /// index-based selection silently drift to a different entity between
+    /// keypresses).
+    pub fn tabs(&self) -> Vec<(String, Vec<ResolvedCard<'_>>)> {
         if !self.dashboard.is_empty() {
             return self
                 .dashboard
                 .iter()
                 .map(|tab| {
-                    let entities = tab.entity_ids.iter().filter_map(|id| self.entities.get(id)).collect();
-                    (tab.name.clone(), entities)
+                    let cards = tab
+                        .resolved_cards()
+                        .into_iter()
+                        .map(|card| ResolvedCard {
+                            title: card.title,
+                            entities: card.entity_ids.iter().filter_map(|id| self.entities.get(id)).collect(),
+                        })
+                        .collect();
+                    (tab.name.clone(), cards)
                 })
                 .collect();
         }
 
-        let mut groups: std::collections::BTreeMap<String, Vec<&Entity>> = std::collections::BTreeMap::new();
+        let mut rooms: std::collections::BTreeMap<String, Vec<&Entity>> = std::collections::BTreeMap::new();
         for entity in self.entities.values() {
-            let group_name = self
+            let room_name = self
                 .registry
                 .area_name_for(&entity.entity_id)
                 .map(str::to_string)
                 .unwrap_or_else(|| entity.domain.clone());
-            groups.entry(group_name).or_default().push(entity);
+            rooms.entry(room_name).or_default().push(entity);
         }
-        for group in groups.values_mut() {
-            group.sort_by(|a, b| (a.friendly_name(), &a.entity_id).cmp(&(b.friendly_name(), &b.entity_id)));
-        }
-        groups.into_iter().collect()
+
+        rooms
+            .into_iter()
+            .map(|(room_name, entities)| {
+                let mut by_domain: std::collections::BTreeMap<String, Vec<&Entity>> = std::collections::BTreeMap::new();
+                for entity in entities {
+                    by_domain.entry(entity.domain.clone()).or_default().push(entity);
+                }
+                let cards = by_domain
+                    .into_iter()
+                    .map(|(domain, mut entities)| {
+                        entities.sort_by(|a, b| (a.friendly_name(), &a.entity_id).cmp(&(b.friendly_name(), &b.entity_id)));
+                        ResolvedCard {
+                            title: Some(titleize(&domain)),
+                            entities,
+                        }
+                    })
+                    .collect();
+                (room_name, cards)
+            })
+            .collect()
+    }
+
+    /// Entities grouped into named tabs, in display order - each tab's
+    /// cards flattened into one ordered list, for navigation/selection
+    /// purposes where card boundaries don't matter.
+    pub fn grouped(&self) -> Vec<(String, Vec<&Entity>)> {
+        self.tabs()
+            .into_iter()
+            .map(|(name, cards)| (name, cards.into_iter().flat_map(|c| c.entities).collect()))
+            .collect()
     }
 
     pub fn group_names(&self) -> Vec<String> {
@@ -370,6 +430,18 @@ impl AppState {
             .nth(self.selected_group)
             .map(|(_, entities)| entities)
             .unwrap_or_default()
+    }
+
+    /// The cards shown in the main panel: a single untitled "Search
+    /// results" card while filtering, else the selected tab's cards.
+    pub fn visible_cards(&self) -> Vec<ResolvedCard<'_>> {
+        if self.filter.is_some() {
+            return vec![ResolvedCard {
+                title: None,
+                entities: self.filtered_entities(),
+            }];
+        }
+        self.tabs().into_iter().nth(self.selected_group).map(|(_, cards)| cards).unwrap_or_default()
     }
 
     /// The entity list currently shown in the main panel: the active
@@ -693,14 +765,8 @@ mod tests {
             vec![state("light.a", "on"), state("switch.b", "off"), state("sensor.c", "1")],
             Registry::default(),
             vec![
-                DashboardTab {
-                    name: "Second".into(),
-                    entity_ids: vec!["switch.b".into()],
-                },
-                DashboardTab {
-                    name: "First".into(),
-                    entity_ids: vec!["light.a".into(), "sensor.c".into()],
-                },
+                DashboardTab::new("Second", vec!["switch.b".into()]),
+                DashboardTab::new("First", vec!["light.a".into(), "sensor.c".into()]),
             ],
         );
 
@@ -720,10 +786,7 @@ mod tests {
         let a = AppState::new(
             vec![state("light.a", "on")],
             Registry::default(),
-            vec![DashboardTab {
-                name: "Tab".into(),
-                entity_ids: vec!["light.a".into(), "light.missing".into()],
-            }],
+            vec![DashboardTab::new("Tab", vec!["light.a".into(), "light.missing".into()])],
         );
         let groups = a.grouped();
         assert_eq!(groups[0].1.len(), 1);
@@ -783,6 +846,76 @@ mod tests {
 
         a.filter_push_char('x'); // no entity matches "lampx"
         assert!(a.selected_entity().is_none());
+    }
+
+    #[test]
+    fn auto_grouping_splits_a_room_into_one_card_per_domain() {
+        let registry = Registry::build(
+            vec![AreaEntry {
+                area_id: "living_room".into(),
+                name: "Living Room".into(),
+            }],
+            vec![],
+            vec![
+                EntityRegistryEntry {
+                    entity_id: "light.a".into(),
+                    device_id: None,
+                    area_id: Some("living_room".into()),
+                },
+                EntityRegistryEntry {
+                    entity_id: "switch.b".into(),
+                    device_id: None,
+                    area_id: Some("living_room".into()),
+                },
+            ],
+        );
+        let a = app(vec![state("light.a", "on"), state("switch.b", "off")], registry);
+
+        let tabs = a.tabs();
+        let (name, cards) = tabs.iter().find(|(n, _)| n == "Living Room").unwrap();
+        assert_eq!(name, "Living Room");
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].title.as_deref(), Some("Light"));
+        assert_eq!(cards[0].entities[0].entity_id, "light.a");
+        assert_eq!(cards[1].title.as_deref(), Some("Switch"));
+        assert_eq!(cards[1].entities[0].entity_id, "switch.b");
+    }
+
+    #[test]
+    fn dashboard_cards_carry_titles_through_to_visible_cards() {
+        let mut tab = DashboardTab::new("Living Room", vec![]);
+        tab.cards = vec![
+            crate::config::DashboardCard {
+                title: Some("Lights".into()),
+                entity_ids: vec!["light.a".into()],
+            },
+            crate::config::DashboardCard {
+                title: None,
+                entity_ids: vec!["sensor.b".into()],
+            },
+        ];
+        let a = AppState::new(vec![state("light.a", "on"), state("sensor.b", "1")], Registry::default(), vec![tab]);
+
+        let cards = a.visible_cards();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].title.as_deref(), Some("Lights"));
+        assert_eq!(cards[0].entities[0].entity_id, "light.a");
+        assert_eq!(cards[1].title, None);
+        assert_eq!(cards[1].entities[0].entity_id, "sensor.b");
+    }
+
+    #[test]
+    fn filtering_collapses_to_a_single_untitled_card() {
+        let mut a = app(vec![state("light.kitchen_lamp", "on"), state("light.other", "on")], Registry::default());
+        a.start_filter();
+        for c in "kitchen".chars() {
+            a.filter_push_char(c);
+        }
+        let cards = a.visible_cards();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].title, None);
+        assert_eq!(cards[0].entities.len(), 1);
+        assert_eq!(cards[0].entities[0].entity_id, "light.kitchen_lamp");
     }
 
     #[test]

@@ -29,7 +29,45 @@ pub struct Config {
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 pub struct DashboardTab {
     pub name: String,
+    /// Simple form: entity_ids directly on the tab become one untitled
+    /// card. Ignored if `card` entries are present.
+    #[serde(default)]
     pub entity_ids: Vec<String>,
+    /// Structured form (`[[tab.card]]`): multiple titled panels per tab.
+    #[serde(default, rename = "card")]
+    pub cards: Vec<DashboardCard>,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct DashboardCard {
+    #[serde(default)]
+    pub title: Option<String>,
+    pub entity_ids: Vec<String>,
+}
+
+impl DashboardTab {
+    pub fn new(name: impl Into<String>, entity_ids: Vec<String>) -> Self {
+        DashboardTab {
+            name: name.into(),
+            entity_ids,
+            cards: Vec::new(),
+        }
+    }
+
+    /// The tab's cards for display: explicit `cards` if present, else the
+    /// flat `entity_ids` as a single untitled card.
+    pub fn resolved_cards(&self) -> Vec<DashboardCard> {
+        if !self.cards.is_empty() {
+            self.cards.clone()
+        } else if !self.entity_ids.is_empty() {
+            vec![DashboardCard {
+                title: None,
+                entity_ids: self.entity_ids.clone(),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 impl Config {
@@ -124,5 +162,38 @@ mod tests {
         assert_eq!(config.dashboard.len(), 2);
         assert_eq!(config.dashboard[0].name, "Living Room");
         assert_eq!(config.dashboard[0].entity_ids, vec!["light.a", "switch.b"]);
+    }
+
+    #[test]
+    fn structured_cards_parse_and_take_precedence_over_flat_entity_ids() {
+        let toml = r#"
+            ha_url = "http://x"
+            ha_token = "y"
+
+            [[tab]]
+            name = "Living Room"
+
+            [[tab.card]]
+            title = "Lights"
+            entity_ids = ["light.a"]
+
+            [[tab.card]]
+            entity_ids = ["sensor.b"]
+        "#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let cards = config.dashboard[0].resolved_cards();
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].title.as_deref(), Some("Lights"));
+        assert_eq!(cards[0].entity_ids, vec!["light.a"]);
+        assert_eq!(cards[1].title, None);
+    }
+
+    #[test]
+    fn flat_entity_ids_resolve_to_a_single_untitled_card() {
+        let tab = DashboardTab::new("Bedroom", vec!["light.c".to_string()]);
+        let cards = tab.resolved_cards();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].title, None);
+        assert_eq!(cards[0].entity_ids, vec!["light.c"]);
     }
 }

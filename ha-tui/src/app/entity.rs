@@ -80,12 +80,27 @@ impl Entity {
             return if switch.is_on() { "on".to_string() } else { "off".to_string() };
         }
         if let Some(sensor) = self.as_sensor() {
+            let value = round_numeric(sensor.value());
             return match sensor.unit() {
-                Some(unit) => format!("{} {unit}", sensor.value()),
-                None => sensor.value().to_string(),
+                Some(unit) => format!("{value} {unit}"),
+                None => value,
             };
         }
         self.state.clone()
+    }
+}
+
+/// Sensors often report far more decimal precision than is useful on a
+/// narrow terminal panel (e.g. "30.8631578947368"); round to 2 places when
+/// the value is numeric, otherwise pass it through unchanged (most sensor
+/// states aren't numbers at all - "idle", timestamps, ...).
+fn round_numeric(raw: &str) -> String {
+    match raw.parse::<f64>() {
+        Ok(n) => format!("{:.2}", (n * 100.0).round() / 100.0)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string(),
+        Err(_) => raw.to_string(),
     }
 }
 
@@ -273,6 +288,34 @@ mod tests {
         );
         let entity = Entity::from_state(state);
         assert_eq!(entity.as_sensor().unwrap().unit(), Some("ms"));
+    }
+
+    #[test]
+    fn sensor_display_state_rounds_long_decimals_to_two_places() {
+        let state = state_from_json(
+            r#"{
+                "entity_id": "sensor.workroom_ble_temperature",
+                "state": "30.8631578947368",
+                "attributes": { "unit_of_measurement": "°C" },
+                "last_updated": null,
+                "last_changed": null
+            }"#,
+        );
+        let entity = Entity::from_state(state);
+        assert_eq!(entity.display_state(), "30.86 °C");
+    }
+
+    #[test]
+    fn sensor_display_state_trims_trailing_zeros_and_keeps_non_numeric_states() {
+        let whole = Entity::from_state(state_from_json(
+            r#"{"entity_id": "sensor.a", "state": "41.00", "attributes": {"unit_of_measurement": "%"}, "last_updated": null, "last_changed": null}"#,
+        ));
+        assert_eq!(whole.display_state(), "41 %");
+
+        let non_numeric = Entity::from_state(state_from_json(
+            r#"{"entity_id": "sensor.b", "state": "idle", "attributes": {}, "last_updated": null, "last_changed": null}"#,
+        ));
+        assert_eq!(non_numeric.display_state(), "idle");
     }
 
     #[test]
