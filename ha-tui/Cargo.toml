@@ -2,13 +2,17 @@
 name = "ha-tui"
 version = "0.1.0"
 edition = "2021"
+description = "A terminal UI for monitoring and controlling a Home Assistant instance"
+license = "MIT"
+repository = "https://github.com/naqoyqatsi83/ha-tui"
+authors = ["naqoyqatsi83"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 ratatui = "0.29"
 crossterm = "0.28"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
-native-tls = "0.2"
+native-tls = { version = "0.2", features = ["vendored"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -19,3 +23,21 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 directories = "5"
+
+[package.metadata.deb]
+copyright = "2026, naqoyqatsi83"
+extended-description = """\
+A terminal UI application that connects to a Home Assistant instance over its \
+WebSocket API, displays entities grouped by room/domain, updates in real time \
+as states change, and lets you control common entities (lights, switches, \
+climate) with keyboard shortcuts."""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/ha-tui", "usr/bin/", "755"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/ha-tui", dest = "/usr/bin/ha-tui", mode = "755" },
+]

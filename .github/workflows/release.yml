@@ -1,0 +1,147 @@
+name: Release
+
+# Tag pushes of the form vX.Y.Z build release artifacts for:
+#   - Ubuntu / Debian x86_64  -> .deb
+#   - Raspberry Pi (64-bit)   -> .deb (arm64, cross-compiled)
+#   - RPM-based Linux x86_64  -> .rpm
+#   - Windows x86_64          -> .zip
+# and publishes them all to a GitHub Release.
+#
+# Before tagging, bump the `version` in ha-tui/Cargo.toml to match the tag
+# (e.g. tag v1.2.3 requires version = "1.2.3") - the check-version job fails
+# the run otherwise, since cargo-deb/cargo-generate-rpm derive the package
+# version from Cargo.toml, not from the git tag.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches Cargo.toml version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CARGO_VERSION=$(grep -m1 '^version' ha-tui/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match ha-tui/Cargo.toml version $CARGO_VERSION"
+            exit 1
+          fi
+
+  linux-deb-amd64:
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ha-tui
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+      - name: Build .deb (amd64)
+        working-directory: ha-tui
+        run: cargo deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64-deb
+          path: ha-tui/target/debian/*.deb
+
+  linux-deb-arm64:
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ha-tui
+      - name: Install cargo-deb and cross
+        run: |
+          cargo install cargo-deb --locked
+          cargo install cross --locked
+      - name: Cross-build release binary (aarch64, for Raspberry Pi 64-bit)
+        working-directory: ha-tui
+        run: cross build --release --target aarch64-unknown-linux-gnu
+      - name: Package .deb (arm64)
+        working-directory: ha-tui
+        run: cargo deb --target aarch64-unknown-linux-gnu --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-deb
+          path: ha-tui/target/aarch64-unknown-linux-gnu/debian/*.deb
+
+  linux-rpm:
+    needs: check-version
+    runs-on: ubuntu-latest
+    container: rockylinux:9
+    steps:
+      - name: Install build dependencies
+        run: dnf install -y git gcc make perl-core binutils tar which
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ha-tui
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
+      - name: Build release binary
+        working-directory: ha-tui
+        run: cargo build --release
+      - name: Strip binary
+        working-directory: ha-tui
+        run: strip target/release/ha-tui
+      - name: Build .rpm
+        working-directory: ha-tui
+        run: cargo generate-rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-rpm
+          path: ha-tui/target/generate-rpm/*.rpm
+
+  windows:
+    needs: check-version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ha-tui
+      - name: Build release binary
+        working-directory: ha-tui
+        run: cargo build --release
+      - name: Package zip
+        working-directory: ha-tui
+        run: Compress-Archive -Path target/release/ha-tui.exe -DestinationPath "ha-tui-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: ha-tui/ha-tui-*.zip
+
+  release:
+    needs: [linux-deb-amd64, linux-deb-arm64, linux-rpm, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/**/*
