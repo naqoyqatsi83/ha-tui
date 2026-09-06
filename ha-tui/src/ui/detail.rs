@@ -30,6 +30,13 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
         frame.render_widget(message, area);
         return;
     };
+    // More ticks than just the endpoints, scaled a bit with the popup's
+    // own size so a wider/taller chart gets proportionally more of them
+    // rather than the same fixed handful stretched thin.
+    let x_tick_count = ((area.width / 12).clamp(2, 8)) as usize;
+    let y_tick_count = ((area.height / 4).clamp(2, 6)) as usize;
+    let x_labels = series.time_labels(x_tick_count);
+
     let points = series.points;
 
     let min = points.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
@@ -42,6 +49,12 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
         .graph_type(GraphType::Line)
         .style(Style::default().fg(theme::ON))
         .data(&points);
+    let y_labels: Vec<String> = (0..y_tick_count)
+        .map(|i| {
+            let frac = i as f64 / (y_tick_count - 1).max(1) as f64;
+            format!("{:.1}", y_min + frac * (y_max - y_min))
+        })
+        .collect();
 
     let chart = Chart::new(vec![dataset])
         .block(block)
@@ -50,18 +63,14 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
                 .title("time (UTC)")
                 .style(Style::default().fg(theme::BORDER))
                 .bounds([0.0, x_max])
-                .labels(vec![series.start_label, series.end_label]),
+                .labels(x_labels),
         )
         .y_axis(
             Axis::default()
                 .title("value")
                 .style(Style::default().fg(theme::BORDER))
                 .bounds([y_min, y_max])
-                .labels(vec![
-                    format!("{y_min:.1}"),
-                    format!("{:.1}", (y_min + y_max) / 2.0),
-                    format!("{y_max:.1}"),
-                ]),
+                .labels(y_labels),
         );
 
     frame.render_widget(chart, area);

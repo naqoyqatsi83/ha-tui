@@ -176,12 +176,38 @@ fn render_entity_row(frame: &mut Frame, area: Rect, entity: &Entity, app: &AppSt
     frame.render_widget(Paragraph::new(text).style(style), text_area);
 
     if area.height > 1 {
-        let data = app.sparkline_data(&entity.entity_id);
+        // `Sparkline` draws one bar per data point rather than stretching
+        // to fill the given width, so a history buffer that's shorter
+        // than the card (still filling up, or just fewer real samples
+        // than columns) would only use part of it - resample to exactly
+        // the available width so it always fills the panel edge-to-edge.
+        let data = resample(&app.sparkline_data(&entity.entity_id), area.width as usize);
         let spark_area = Rect { y: area.y + 1, height: area.height - 1, ..area };
         let spark_style = Style::default().fg(if selected { theme::HIGHLIGHT_BG } else { theme::ACCENT });
         let sparkline = Sparkline::default().data(&data).style(spark_style);
         frame.render_widget(sparkline, spark_area);
     }
+}
+
+/// Nearest-neighbor stretches or compresses `data` to exactly `width`
+/// points, so the sparkline always spans the full panel width regardless
+/// of how many real history samples are behind it.
+fn resample(data: &[u64], width: usize) -> Vec<u64> {
+    if width == 0 {
+        return Vec::new();
+    }
+    if data.is_empty() {
+        return vec![0; width];
+    }
+    if data.len() == width {
+        return data.to_vec();
+    }
+    (0..width)
+        .map(|i| {
+            let src = if width > 1 { i * (data.len() - 1) / (width - 1) } else { 0 };
+            data[src]
+        })
+        .collect()
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -216,5 +242,40 @@ fn row_style(entity: &Entity, app: &AppState) -> Style {
         base.add_modifier(Modifier::REVERSED | Modifier::BOLD)
     } else {
         base
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resample_stretches_fewer_points_to_fill_the_width() {
+        let data = vec![0, 100];
+        let out = resample(&data, 5);
+        assert_eq!(out.len(), 5);
+        assert_eq!(out[0], 0);
+        assert_eq!(out[4], 100);
+    }
+
+    #[test]
+    fn resample_compresses_more_points_down_to_the_width() {
+        let data: Vec<u64> = (0..60).collect();
+        let out = resample(&data, 10);
+        assert_eq!(out.len(), 10);
+        assert_eq!(out[0], 0);
+        assert_eq!(out[9], 59);
+    }
+
+    #[test]
+    fn resample_is_a_noop_when_lengths_already_match() {
+        let data = vec![1, 2, 3];
+        assert_eq!(resample(&data, 3), data);
+    }
+
+    #[test]
+    fn resample_handles_empty_data_and_zero_width() {
+        assert_eq!(resample(&[], 4), vec![0, 0, 0, 0]);
+        assert_eq!(resample(&[1, 2, 3], 0), Vec::<u64>::new());
     }
 }

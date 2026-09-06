@@ -34,8 +34,26 @@ struct HistoryPoint {
 /// value) points plus real clock labels for the detail popup's time axis.
 pub struct HistorySeries {
     pub points: Vec<(f64, f64)>,
-    pub start_label: String,
-    pub end_label: String,
+    /// Unix timestamp of `points[0]` (elapsed-seconds 0) - lets a caller
+    /// derive a clock label for any point along the X axis, not just the
+    /// two ends.
+    oldest: f64,
+}
+
+impl HistorySeries {
+    /// `count` evenly-spaced HH:MM (UTC) labels spanning the series, for
+    /// an X axis with more than just start/end ticks. `count` < 2 still
+    /// gives at least the two endpoints.
+    pub fn time_labels(&self, count: usize) -> Vec<String> {
+        let x_max = self.points.last().map(|p| p.0).unwrap_or(0.0);
+        let count = count.max(2);
+        (0..count)
+            .map(|i| {
+                let frac = i as f64 / (count - 1) as f64;
+                format_clock(self.oldest + frac * x_max)
+            })
+            .collect()
+    }
 }
 
 fn unix_now() -> f64 {
@@ -244,20 +262,17 @@ impl AppState {
     /// `entity_id`'s history for the detail chart: real-valued (elapsed
     /// seconds since the oldest point, value) pairs (unlike
     /// `sparkline_data`, not normalized - the chart draws its own
-    /// real-valued Y axis), plus HH:MM (UTC) clock labels for the first
-    /// and last point, for a real time axis. `None` if there's fewer than
-    /// two points to plot.
+    /// real-valued Y axis). Use `HistorySeries::time_labels` for a real
+    /// time axis. `None` if there's fewer than two points to plot.
     pub fn history_series(&self, entity_id: &str) -> Option<HistorySeries> {
         let buf = self.history.get(entity_id)?;
-        let oldest = buf.front()?.at;
-        let newest = buf.back()?.at;
         if buf.len() < 2 {
             return None;
         }
+        let oldest = buf.front()?.at;
         Some(HistorySeries {
             points: buf.iter().map(|p| (p.at - oldest, p.value)).collect(),
-            start_label: format_clock(oldest),
-            end_label: format_clock(newest),
+            oldest,
         })
     }
 
@@ -1354,8 +1369,10 @@ mod tests {
 
         let series = a.history_series("sensor.temp").expect("should have history");
         assert_eq!(series.points, vec![(0.0, 10.0), (30.0, 20.0), (90.0, 30.0)]);
-        assert_eq!(series.start_label, "00:00");
-        assert_eq!(series.end_label, "00:01");
+        // 2 labels = just the endpoints.
+        assert_eq!(series.time_labels(2), vec!["00:00", "00:01"]);
+        // More labels spread evenly across the same span.
+        assert_eq!(series.time_labels(4), vec!["00:00", "00:00", "00:01", "00:01"]);
 
         assert!(a.history_series("sensor.unknown").is_none());
     }
