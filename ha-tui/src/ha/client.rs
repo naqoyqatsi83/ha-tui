@@ -8,7 +8,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
-use super::protocol::{EventPayload, Incoming, Outgoing, StateObject};
+use super::protocol::{AreaEntry, DeviceEntry, EntityRegistryEntry, EventPayload, Incoming, Outgoing, StateObject};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -111,25 +111,28 @@ impl HaConnection {
     }
 
     /// Fetches the area registry (rooms/areas configured in HA).
-    pub async fn area_registry(&mut self) -> Result<Value> {
+    pub async fn area_registry(&mut self) -> Result<Vec<AreaEntry>> {
         let id = self.next_id();
         self.send_raw(&Outgoing::AreaRegistryList { id }).await?;
-        Ok(self.await_result(id).await?.unwrap_or(Value::Null))
+        let result = self.await_result(id).await?;
+        serde_json::from_value(result.unwrap_or(Value::Null)).context("failed to parse area_registry result")
     }
 
     /// Fetches the device registry (used to resolve an entity's area via
     /// its device, when the entity itself has no direct area assignment).
-    pub async fn device_registry(&mut self) -> Result<Value> {
+    pub async fn device_registry(&mut self) -> Result<Vec<DeviceEntry>> {
         let id = self.next_id();
         self.send_raw(&Outgoing::DeviceRegistryList { id }).await?;
-        Ok(self.await_result(id).await?.unwrap_or(Value::Null))
+        let result = self.await_result(id).await?;
+        serde_json::from_value(result.unwrap_or(Value::Null)).context("failed to parse device_registry result")
     }
 
     /// Fetches the entity registry (entity -> device/area linkage).
-    pub async fn entity_registry(&mut self) -> Result<Value> {
+    pub async fn entity_registry(&mut self) -> Result<Vec<EntityRegistryEntry>> {
         let id = self.next_id();
         self.send_raw(&Outgoing::EntityRegistryList { id }).await?;
-        Ok(self.await_result(id).await?.unwrap_or(Value::Null))
+        let result = self.await_result(id).await?;
+        serde_json::from_value(result.unwrap_or(Value::Null)).context("failed to parse entity_registry result")
     }
 
     /// Subscribes to events of the given type (or all events if `None`).
@@ -234,4 +237,112 @@ pub fn as_state_changed(event: &EventPayload) -> Option<super::protocol::StateCh
     }
     let data = event.data.clone()?;
     serde_json::from_value(data).ok()
+}
+
+/// Updates the WS task pushes to the app as they happen.
+#[derive(Debug)]
+pub enum WsEvent {
+    /// The full state + registry snapshot fetched right after each
+    /// successful (re)connect. The app should replace its entire state
+    /// with this, since a reconnect may have missed events.
+    Snapshot {
+        states: Vec<StateObject>,
+        areas: Vec<AreaEntry>,
+        devices: Vec<DeviceEntry>,
+        entities: Vec<EntityRegistryEntry>,
+    },
+    StateChanged(super::protocol::StateChangedData),
+}
+
+/// Requests the app sends to the WS task.
+#[derive(Debug)]
+pub enum Command {
+    CallService {
+        domain: String,
+        service: String,
+        service_data: Option<Value>,
+        target: Option<Value>,
+    },
+}
+
+/// Owns the HA connection for the lifetime of the app: connects (with
+/// reconnect/backoff), fetches a fresh snapshot on every (re)connect,
+/// forwards `state_changed` events, and executes `Command`s the app sends
+/// back (e.g. service calls from user input). Runs until `cmd_rx` is
+/// dropped (the app shutting down) or `event_tx` has no more receivers.
+pub async fn run(
+    base_url: String,
+    token: String,
+    insecure_skip_verify: bool,
+    event_tx: tokio::sync::mpsc::UnboundedSender<WsEvent>,
+    mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<Command>,
+) {
+    'reconnect: loop {
+        let mut conn = connect_with_backoff(&base_url, &token, insecure_skip_verify).await;
+        tracing::info!("connected to HA");
+
+        let snapshot = async {
+            let states = conn.get_states().await?;
+            let areas = conn.area_registry().await?;
+            let devices = conn.device_registry().await?;
+            let entities = conn.entity_registry().await?;
+            conn.subscribe_events(Some("state_changed")).await?;
+            Ok::<_, anyhow::Error>((states, areas, devices, entities))
+        };
+
+        let (states, areas, devices, entities) = match snapshot.await {
+            Ok(snapshot) => snapshot,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to fetch initial snapshot, reconnecting");
+                continue 'reconnect;
+            }
+        };
+
+        if event_tx
+            .send(WsEvent::Snapshot {
+                states,
+                areas,
+                devices,
+                entities,
+            })
+            .is_err()
+        {
+            return; // app has shut down
+        }
+
+        loop {
+            tokio::select! {
+                incoming = conn.read_incoming() => {
+                    match incoming {
+                        Ok(Some(Incoming::Event { event, .. })) => {
+                            if let Some(change) = as_state_changed(&event) {
+                                if event_tx.send(WsEvent::StateChanged(change)).is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            tracing::warn!("HA connection closed, reconnecting");
+                            continue 'reconnect;
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, "HA connection error, reconnecting");
+                            continue 'reconnect;
+                        }
+                    }
+                }
+                cmd = cmd_rx.recv() => {
+                    match cmd {
+                        Some(Command::CallService { domain, service, service_data, target }) => {
+                            if let Err(err) = conn.call_service(&domain, &service, service_data, target).await {
+                                tracing::warn!(error = %err, domain, service, "call_service failed");
+                            }
+                        }
+                        None => return, // app has shut down
+                    }
+                }
+            }
+        }
+    }
 }

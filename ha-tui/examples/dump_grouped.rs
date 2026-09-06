@@ -3,7 +3,7 @@
 //! against a real instance.
 
 use anyhow::Result;
-use ha_tui::app::registry::{AreaEntry, DeviceEntry, EntityRegistryEntry, Registry};
+use ha_tui::app::registry::Registry;
 use ha_tui::app::AppState;
 use ha_tui::config::{default_config_path, Config};
 use ha_tui::ha::HaConnection;
@@ -14,9 +14,9 @@ async fn main() -> Result<()> {
     let mut conn = HaConnection::connect(&config.ha_url, &config.ha_token, config.insecure_skip_verify).await?;
 
     let states = conn.get_states().await?;
-    let areas: Vec<AreaEntry> = serde_json::from_value(conn.area_registry().await?)?;
-    let devices: Vec<DeviceEntry> = serde_json::from_value(conn.device_registry().await?)?;
-    let entities: Vec<EntityRegistryEntry> = serde_json::from_value(conn.entity_registry().await?)?;
+    let areas = conn.area_registry().await?;
+    let devices = conn.device_registry().await?;
+    let entities = conn.entity_registry().await?;
 
     let registry = Registry::build(areas, devices, entities);
     let app = AppState::new(states, registry);

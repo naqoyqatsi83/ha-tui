@@ -59,6 +59,31 @@ pub struct StateObject {
     pub last_changed: Option<String>,
 }
 
+/// Registry payloads deliberately only pull the handful of fields we use -
+/// HA's registries carry many more (labels, config_entry_id, ...) that we
+/// don't need and shouldn't break deserialization over if they change.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AreaEntry {
+    pub area_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceEntry {
+    pub id: String,
+    #[serde(default)]
+    pub area_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EntityRegistryEntry {
+    pub entity_id: String,
+    #[serde(default)]
+    pub device_id: Option<String>,
+    #[serde(default)]
+    pub area_id: Option<String>,
+}
+
 /// Messages we send to HA. Each has an `id` assigned by the client's
 /// monotonic counter, except `auth` which precedes id assignment.
 #[derive(Debug, Clone, Serialize)]
