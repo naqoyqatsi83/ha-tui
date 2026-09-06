@@ -9,7 +9,8 @@ use ratatui::Frame;
 
 use crate::app::AppState;
 
-const HELP_LINE: &str = "j/k: move   Tab/Shift+Tab: switch room   q: quit";
+const HELP_LINE: &str =
+    "j/k: move   Tab/Shift+Tab: switch room   Enter/Space: toggle   +/-: adjust   q: quit";
 
 pub fn draw(frame: &mut Frame, app: &AppState) {
     let outer = Layout::default()
@@ -25,8 +26,11 @@ pub fn draw(frame: &mut Frame, app: &AppState) {
     tabs::render(frame, body[0], app);
     list::render(frame, body[1], app);
 
-    let help = Paragraph::new(Line::from(HELP_LINE)).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(help, outer[1]);
+    let bottom = match app.status_message() {
+        Some(message) => Paragraph::new(Line::from(message)).style(Style::default().fg(Color::Yellow)),
+        None => Paragraph::new(Line::from(HELP_LINE)).style(Style::default().fg(Color::DarkGray)),
+    };
+    frame.render_widget(bottom, outer[1]);
 }
 
 /// Shown before the first snapshot has arrived from the WS task.

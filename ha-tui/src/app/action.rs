@@ -9,6 +9,12 @@ pub enum Action {
     MoveDown,
     NextGroup,
     PrevGroup,
+    /// Enter/Space on a light or switch row: call its `toggle` service.
+    Toggle,
+    /// `+`: light -> brightness up a step, climate -> target temp up a step.
+    Increase,
+    /// `-`: light -> brightness down a step, climate -> target temp down a step.
+    Decrease,
 }
 
 impl Action {
@@ -24,6 +30,9 @@ impl Action {
             KeyCode::Down | KeyCode::Char('j') => Some(Action::MoveDown),
             KeyCode::Tab => Some(Action::NextGroup),
             KeyCode::BackTab => Some(Action::PrevGroup),
+            KeyCode::Enter | KeyCode::Char(' ') => Some(Action::Toggle),
+            KeyCode::Char('+') | KeyCode::Char('=') => Some(Action::Increase),
+            KeyCode::Char('-') => Some(Action::Decrease),
             _ => None,
         }
     }
@@ -47,6 +56,11 @@ mod tests {
         assert_eq!(Action::from_key(press(KeyCode::Up)), Some(Action::MoveUp));
         assert_eq!(Action::from_key(press(KeyCode::Tab)), Some(Action::NextGroup));
         assert_eq!(Action::from_key(press(KeyCode::BackTab)), Some(Action::PrevGroup));
+        assert_eq!(Action::from_key(press(KeyCode::Enter)), Some(Action::Toggle));
+        assert_eq!(Action::from_key(press(KeyCode::Char(' '))), Some(Action::Toggle));
+        assert_eq!(Action::from_key(press(KeyCode::Char('+'))), Some(Action::Increase));
+        assert_eq!(Action::from_key(press(KeyCode::Char('='))), Some(Action::Increase));
+        assert_eq!(Action::from_key(press(KeyCode::Char('-'))), Some(Action::Decrease));
     }
 
     #[test]

@@ -11,13 +11,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
     let items: Vec<ListItem> = entities
         .iter()
         .map(|entity| {
-            let state_display = match entity.as_sensor() {
-                Some(sensor) => match sensor.unit() {
-                    Some(unit) => format!("{} {unit}", entity.state),
-                    None => entity.state.clone(),
-                },
-                None => entity.state.clone(),
-            };
+            let state_display = app.display_state(entity);
             ListItem::new(format!("{:<40} {}", entity.friendly_name(), state_display))
         })
         .collect();

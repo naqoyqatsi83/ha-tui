@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -19,6 +20,14 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 pub struct HaConnection {
     socket: WsStream,
     next_id: AtomicU64,
+    /// `Event` messages that arrived while `await_result` was waiting for
+    /// an unrelated request's ack (HA can interleave a subscription's
+    /// event notifications with any other request's result on the same
+    /// socket). Queued here instead of dropped, and drained by
+    /// `read_incoming` before it reads the socket again, so the run()
+    /// loop's event subscriber never misses a `state_changed` that
+    /// happened to arrive mid-`call_service`.
+    pending_events: VecDeque<Incoming>,
 }
 
 impl HaConnection {
@@ -46,13 +55,14 @@ impl HaConnection {
         let mut conn = HaConnection {
             socket,
             next_id: AtomicU64::new(1),
+            pending_events: VecDeque::new(),
         };
         conn.authenticate(token).await?;
         Ok(conn)
     }
 
     async fn authenticate(&mut self, token: &str) -> Result<()> {
-        match self.read_incoming().await?.context("connection closed during handshake")? {
+        match self.read_from_socket().await?.context("connection closed during handshake")? {
             Incoming::AuthRequired { .. } => {}
             other => bail!("expected auth_required, got {other:?}"),
         }
@@ -62,7 +72,7 @@ impl HaConnection {
         })
         .await?;
 
-        match self.read_incoming().await?.context("connection closed during auth")? {
+        match self.read_from_socket().await?.context("connection closed during auth")? {
             Incoming::AuthOk { .. } => Ok(()),
             Incoming::AuthInvalid { message } => {
                 bail!("HA rejected the access token: {}", message.unwrap_or_default())
@@ -82,8 +92,24 @@ impl HaConnection {
     }
 
     /// Reads the next non-ping/pong/close frame as an [`Incoming`] message.
-    /// Returns `Ok(None)` if the stream ended.
+    /// Returns `Ok(None)` if the stream ended. Serves any event queued by
+    /// `await_result` before reading the socket again, so events are
+    /// delivered in the order they actually arrived on the wire.
+    ///
+    /// Only for the outer consumer (the `run()` event loop) - `await_result`
+    /// must use `read_from_socket` directly, never this, or a stray event it
+    /// just queued would be immediately handed straight back to it here,
+    /// looping forever without ever polling the socket again.
     pub async fn read_incoming(&mut self) -> Result<Option<Incoming>> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(Some(event));
+        }
+        self.read_from_socket().await
+    }
+
+    /// Reads the next non-ping/pong/close frame straight from the socket,
+    /// bypassing `pending_events`.
+    async fn read_from_socket(&mut self) -> Result<Option<Incoming>> {
         loop {
             let Some(msg) = self.socket.next().await else {
                 return Ok(None);
@@ -170,13 +196,12 @@ impl HaConnection {
         Ok(())
     }
 
-    /// Waits for the `result` message matching `id`, skipping any `event`
-    /// messages that arrive first (they're delivered to the caller's own
-    /// event loop separately in the reconnect-driven runner; here we just
-    /// drop them since this helper is only used right after a request).
+    /// Waits for the `result` message matching `id`. Any `Event` message
+    /// that arrives first is queued (not dropped - see `pending_events`)
+    /// for the next `read_incoming` call to deliver.
     async fn await_result(&mut self, id: u64) -> Result<Option<Value>> {
         loop {
-            match self.read_incoming().await?.context("connection closed waiting for result")? {
+            match self.read_from_socket().await?.context("connection closed waiting for result")? {
                 Incoming::Result {
                     id: rid,
                     success,
@@ -191,7 +216,7 @@ impl HaConnection {
                         .unwrap_or_else(|| "unknown error".to_string());
                     bail!("HA command {id} failed: {msg}");
                 }
-                Incoming::Event { .. } => continue,
+                event @ Incoming::Event { .. } => self.pending_events.push_back(event),
                 _ => continue,
             }
         }
@@ -252,6 +277,9 @@ pub enum WsEvent {
         entities: Vec<EntityRegistryEntry>,
     },
     StateChanged(super::protocol::StateChangedData),
+    /// A `Command` the app sent (e.g. a toggle from a keypress) came back
+    /// as a HA error result.
+    CommandFailed { message: String },
 }
 
 /// Requests the app sends to the WS task.
@@ -316,6 +344,7 @@ pub async fn run(
                     match incoming {
                         Ok(Some(Incoming::Event { event, .. })) => {
                             if let Some(change) = as_state_changed(&event) {
+                                tracing::debug!(entity_id = %change.entity_id, new_state = ?change.new_state.as_ref().map(|s| &s.state), "state_changed");
                                 if event_tx.send(WsEvent::StateChanged(change)).is_err() {
                                     return;
                                 }
@@ -337,6 +366,7 @@ pub async fn run(
                         Some(Command::CallService { domain, service, service_data, target }) => {
                             if let Err(err) = conn.call_service(&domain, &service, service_data, target).await {
                                 tracing::warn!(error = %err, domain, service, "call_service failed");
+                                let _ = event_tx.send(WsEvent::CommandFailed { message: err.to_string() });
                             }
                         }
                         None => return, // app has shut down

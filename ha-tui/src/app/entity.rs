@@ -52,6 +52,41 @@ impl Entity {
     pub fn as_sensor(&self) -> Option<SensorView<'_>> {
         (self.domain == "sensor").then_some(SensorView(self))
     }
+
+    /// Human-readable state text for the entity list, with domain-specific
+    /// detail (brightness, target/current temperature, unit) where we have
+    /// a typed view for it. `AppState::display_state` overrides this with
+    /// a pending optimistic value when one is in flight.
+    pub fn display_state(&self) -> String {
+        if let Some(light) = self.as_light() {
+            return match (light.is_on(), light.brightness()) {
+                (true, Some(b)) => format!("on (brightness {b}/255)"),
+                (true, None) => "on".to_string(),
+                (false, _) => "off".to_string(),
+            };
+        }
+        if let Some(climate) = self.as_climate() {
+            let current = climate
+                .current_temperature()
+                .map(|t| format!("{t:.1}°"))
+                .unwrap_or_else(|| "-".to_string());
+            let target = climate
+                .target_temperature()
+                .map(|t| format!("{t:.1}°"))
+                .unwrap_or_else(|| "-".to_string());
+            return format!("{}  cur:{current} target:{target}", climate.hvac_mode());
+        }
+        if let Some(switch) = self.as_switch() {
+            return if switch.is_on() { "on".to_string() } else { "off".to_string() };
+        }
+        if let Some(sensor) = self.as_sensor() {
+            return match sensor.unit() {
+                Some(unit) => format!("{} {unit}", sensor.value()),
+                None => sensor.value().to_string(),
+            };
+        }
+        self.state.clone()
+    }
 }
 
 pub fn domain_of(entity_id: &str) -> String {
