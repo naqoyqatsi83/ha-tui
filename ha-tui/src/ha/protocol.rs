@@ -1,0 +1,87 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Messages sent from HA to us over the WS connection.
+/// Kept permissive (`Other` fallback, `Option` fields) since payload shape
+/// varies across HA versions/integrations and we must never panic on it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum Incoming {
+    #[serde(rename = "auth_required")]
+    AuthRequired { ha_version: Option<String> },
+    #[serde(rename = "auth_ok")]
+    AuthOk { ha_version: Option<String> },
+    #[serde(rename = "auth_invalid")]
+    AuthInvalid { message: Option<String> },
+    #[serde(rename = "result")]
+    Result {
+        id: u64,
+        success: bool,
+        #[serde(default)]
+        result: Option<Value>,
+        #[serde(default)]
+        error: Option<ResultError>,
+    },
+    #[serde(rename = "event")]
+    Event { id: u64, event: EventPayload },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResultError {
+    pub code: Option<String>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EventPayload {
+    pub event_type: Option<String>,
+    #[serde(default)]
+    pub data: Option<Value>,
+}
+
+/// A parsed `state_changed` event's `data` field.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StateChangedData {
+    pub entity_id: String,
+    pub old_state: Option<StateObject>,
+    pub new_state: Option<StateObject>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StateObject {
+    pub entity_id: String,
+    pub state: String,
+    #[serde(default)]
+    pub attributes: Value,
+    pub last_updated: Option<String>,
+    pub last_changed: Option<String>,
+}
+
+/// Messages we send to HA. Each has an `id` assigned by the client's
+/// monotonic counter, except `auth` which precedes id assignment.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum Outgoing {
+    #[serde(rename = "auth")]
+    Auth { access_token: String },
+    #[serde(rename = "subscribe_events")]
+    SubscribeEvents {
+        id: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        event_type: Option<String>,
+    },
+    #[serde(rename = "get_states")]
+    GetStates { id: u64 },
+    #[serde(rename = "call_service")]
+    CallService {
+        id: u64,
+        domain: String,
+        service: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        service_data: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target: Option<Value>,
+    },
+}

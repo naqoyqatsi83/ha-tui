@@ -385,6 +385,7 @@ dependencies = [
  "crossterm",
  "directories",
  "futures-util",
+ "native-tls",
  "ratatui",
  "serde",
  "serde_json",

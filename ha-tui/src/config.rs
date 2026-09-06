@@ -7,6 +7,10 @@ use serde::Deserialize;
 pub struct Config {
     pub ha_url: String,
     pub ha_token: String,
+    /// Accept self-signed / otherwise invalid TLS certs on the HA connection.
+    /// Only meant for trusted local instances - off by default.
+    #[serde(default)]
+    pub insecure_skip_verify: bool,
 }
 
 impl Config {

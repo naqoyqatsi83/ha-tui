@@ -1,9 +1,6 @@
-mod config;
-mod logging;
-mod terminal;
-
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode};
+use ha_tui::{config, logging, terminal};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 #[tokio::main]
