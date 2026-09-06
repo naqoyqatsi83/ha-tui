@@ -675,6 +675,23 @@ impl AppState {
         self.visible_cards().into_iter().nth(card).and_then(|c| c.entities.into_iter().nth(row))
     }
 
+    /// Selects tab `index` directly, e.g. a mouse click on a tab label.
+    /// No-op while filtering (a search's results aren't organized into
+    /// tabs), for an out-of-range index, or if it's already selected
+    /// (avoids restarting the tab-switch animation for nothing).
+    pub fn select_group(&mut self, index: usize) {
+        if self.filter.is_some() || index == self.selected_group {
+            return;
+        }
+        if index >= self.grouped().len() {
+            return;
+        }
+        self.selected_group = index;
+        self.selected_card = 0;
+        self.selected_row = 0;
+        self.tab_transition_started_at = Some(Instant::now());
+    }
+
     /// No-op while filtering (groups aren't meaningful for a global search).
     pub fn next_group(&mut self) {
         if self.filter.is_some() {
@@ -979,6 +996,30 @@ mod tests {
         assert_eq!(a.selected_group_name().as_deref(), Some("light"));
         // selection resets to the top of the group on group change
         assert_eq!(a.selected_entity().unwrap().entity_id, "light.a");
+    }
+
+    #[test]
+    fn select_group_jumps_directly_to_a_tab_by_index() {
+        let mut a = app(
+            vec![state("light.a", "on"), state("switch.b", "on")],
+            Registry::default(),
+        );
+        assert_eq!(a.selected_group_name().as_deref(), Some("light"));
+
+        a.select_group(1);
+        assert_eq!(a.selected_group_name().as_deref(), Some("switch"));
+        // selection resets to the top of the newly-selected tab
+        assert_eq!(a.selected_entity().unwrap().entity_id, "switch.b");
+    }
+
+    #[test]
+    fn select_group_ignores_out_of_range_index() {
+        let mut a = app(
+            vec![state("light.a", "on"), state("switch.b", "on")],
+            Registry::default(),
+        );
+        a.select_group(99);
+        assert_eq!(a.selected_group_name().as_deref(), Some("light"));
     }
 
     #[test]

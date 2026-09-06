@@ -20,7 +20,8 @@ const LINES: &[&str] = &[
     "?              toggle this help",
     "q              quit",
     "",
-    "mouse: click a row to select and toggle it, scroll to move",
+    "mouse: click a row to select it, double-click to toggle/open its chart",
+    "mouse: click a tab to switch to it, scroll to move within a panel",
     "",
     "press any key or click to close",
 ];

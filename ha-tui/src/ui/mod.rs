@@ -13,7 +13,7 @@ use ratatui::Frame;
 use crate::app::AppState;
 
 const HELP_LINE: &str =
-    "hjkl/arrows/mouse: move   Tab/Shift+Tab: switch tab   Enter/Space/click: toggle   +/-: adjust   /: search   ?: help   q: quit";
+    "hjkl/arrows/click/scroll: move   Tab/click tab: switch tab   Enter/Space/double-click: toggle   +/-: adjust   /: search   ?: help   q: quit";
 
 /// A clickable entity row's screen area from the most recent draw, and
 /// which (card, row) in `AppState`'s grid it corresponds to - lets the
@@ -25,14 +25,31 @@ pub struct RowHit {
     pub row: usize,
 }
 
-pub fn draw(frame: &mut Frame, app: &AppState) -> Vec<RowHit> {
+/// A clickable tab label's screen area from the most recent draw, and its
+/// index into `AppState::group_names()`.
+pub struct TabHit {
+    pub area: Rect,
+    pub index: usize,
+}
+
+/// Everything the mouse click handler needs from the most recent draw to
+/// resolve a `(column, row)` position back to "which tab" or "which
+/// (card, row)" - kept together since both are only valid until the next
+/// redraw reshapes the layout.
+#[derive(Default)]
+pub struct DrawHits {
+    pub tabs: Vec<TabHit>,
+    pub rows: Vec<RowHit>,
+}
+
+pub fn draw(frame: &mut Frame, app: &AppState) -> DrawHits {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
         .split(frame.area());
 
-    tabs::render(frame, outer[0], app);
-    let hits = cards::render(frame, outer[1], app);
+    let tab_hits = tabs::render(frame, outer[0], app);
+    let row_hits = cards::render(frame, outer[1], app);
 
     let status_block = Block::default()
         .borders(Borders::ALL)
@@ -58,7 +75,7 @@ pub fn draw(frame: &mut Frame, app: &AppState) -> Vec<RowHit> {
         help::render(frame);
     }
 
-    hits
+    DrawHits { tabs: tab_hits, rows: row_hits }
 }
 
 /// Shown before the first snapshot has arrived from the WS task.
@@ -114,12 +131,12 @@ mod tests {
 
         let backend = TestBackend::new(80, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut hits: Vec<RowHit> = Vec::new();
+        let mut hits = DrawHits::default();
         terminal.draw(|frame| hits = draw(frame, &app)).unwrap();
 
-        assert_eq!(hits.len(), 2);
-        let left = hits.iter().find(|h| h.card == 0).expect("card 0 should have a hit");
-        let right = hits.iter().find(|h| h.card == 1).expect("card 1 should have a hit");
+        assert_eq!(hits.rows.len(), 2);
+        let left = hits.rows.iter().find(|h| h.card == 0).expect("card 0 should have a hit");
+        let right = hits.rows.iter().find(|h| h.card == 1).expect("card 1 should have a hit");
         assert_eq!(left.row, 0);
         assert_eq!(right.row, 0);
         // Two panels side by side (80 columns fits both at the default
@@ -133,5 +150,34 @@ mod tests {
         assert!(right.area.contains(Position { x: right.area.x, y: right.area.y }));
         // And the two rows' areas must not overlap.
         assert!(!left.area.contains(Position { x: right.area.x, y: right.area.y }));
+    }
+
+    /// `TabHit` mirrors `ratatui::widgets::Tabs`'s own internal layout
+    /// (padding + divider around each title) by hand, since the widget
+    /// doesn't expose where each title landed - so this checks the
+    /// mirrored math against what a real `Tabs` render actually produced.
+    #[test]
+    fn draw_returns_tab_hits_sized_to_each_tabs_own_name() {
+        let a = AppState::new(
+            vec![state("light.a"), state("light.b")],
+            Registry::default(),
+            vec![
+                DashboardTab::new("First", vec!["light.a".into()]),
+                DashboardTab::new("Second", vec!["light.b".into()]),
+            ],
+        );
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut hits = DrawHits::default();
+        terminal.draw(|frame| hits = draw(frame, &a)).unwrap();
+
+        assert_eq!(hits.tabs.len(), 2);
+        let first = hits.tabs.iter().find(|t| t.index == 0).expect("tab 0 should have a hit");
+        let second = hits.tabs.iter().find(|t| t.index == 1).expect("tab 1 should have a hit");
+        assert_eq!(first.area.width, "First".len() as u16);
+        assert_eq!(second.area.width, "Second".len() as u16);
+        assert_eq!(first.area.y, second.area.y);
+        assert!(second.area.x > first.area.x + first.area.width);
     }
 }

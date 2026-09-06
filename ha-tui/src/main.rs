@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::{MouseButton, MouseEventKind};
@@ -11,7 +11,12 @@ use ha_tui::{config, ha, input, logging, terminal, ui};
 use ratatui::layout::Position;
 use tokio::sync::mpsc;
 
-/// Enter/Space on a row, or a mouse click landing on one (after `select`
+/// Two left-clicks on the same row within this long of each other count
+/// as a double-click. Standard desktop double-click intervals run roughly
+/// 300-500ms; 400ms splits the difference.
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
+
+/// Enter/Space on a row, or a double-click landing on one (after `select`
 /// has already moved there): opens the detail chart for a graphed entity,
 /// otherwise toggles it. Shared so keyboard and mouse activation can never
 /// disagree about what "activating" a row does. Returns whether anything
@@ -57,11 +62,17 @@ async fn main() -> Result<()> {
     let (_guard, mut tui) = terminal::TerminalGuard::init()?;
 
     let mut app: Option<AppState> = None;
-    // Screen positions of the entity rows drawn in the most recent frame,
-    // for mapping a mouse click back to a (card, row) selection - stale
-    // between draws, but a click always lands after the frame it's
-    // clicking on, so it's always in sync with what's actually on screen.
-    let mut hits: Vec<ui::RowHit> = Vec::new();
+    // Screen positions of the tabs/entity rows drawn in the most recent
+    // frame, for mapping a mouse click back to a tab index or (card, row)
+    // selection - stale between draws, but a click always lands after the
+    // frame it's clicking on, so it's always in sync with what's actually
+    // on screen.
+    let mut hits = ui::DrawHits::default();
+    // (when, card, row) of the last left-click that landed on a row, for
+    // double-click detection - a second click on the *same row* (not
+    // necessarily the same cell within it) within `DOUBLE_CLICK_WINDOW`
+    // activates it instead of just selecting it.
+    let mut last_row_click: Option<(Instant, usize, usize)> = None;
     // Only fires often enough to expire stale optimistic updates / status
     // messages (both on a 5s timeout) - not a general redraw tick.
     let mut expiry_tick = tokio::time::interval(Duration::from_millis(500));
@@ -178,31 +189,50 @@ async fn main() -> Result<()> {
                         }
                     }
                     InputEvent::Mouse(mouse) => {
-                        if app.show_help {
-                            // Any click (or scroll) dismisses the help
-                            // overlay, mirroring "any key" for keyboard.
+                        // Crossterm also reports drag/move/release as
+                        // distinct `MouseEventKind`s; only a fresh left
+                        // press and scroll ticks are meaningful here.
+                        // Treating every kind as "any input" (like the key
+                        // handler's overlay-dismiss does) would mean the
+                        // *release* of the very click that just opened the
+                        // detail popup immediately closes it again.
+                        let is_click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+                        let is_scroll = matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown);
+
+                        if !is_click && !is_scroll {
+                            dirty = false;
+                        } else if app.show_help {
                             app.close_help();
                         } else if app.detail_entity().is_some() {
                             app.close_detail();
                         } else if app.is_filter_editing() {
                             // The filter text box has no mouse affordances.
                             dirty = false;
-                        } else {
+                        } else if is_scroll {
                             let columns = ui::cards::columns_for(tui.size().map(|s| s.width).unwrap_or(80), app.visible_cards().len());
                             match mouse.kind {
                                 MouseEventKind::ScrollUp => app.move_up(columns),
                                 MouseEventKind::ScrollDown => app.move_down(columns),
-                                MouseEventKind::Down(MouseButton::Left) => {
-                                    let pos = Position { x: mouse.column, y: mouse.row };
-                                    match hits.iter().find(|hit| hit.area.contains(pos)) {
-                                        Some(hit) => {
-                                            app.select(hit.card, hit.row);
-                                            dirty = activate_selected(app, &cmd_tx);
-                                        }
-                                        None => dirty = false,
-                                    }
+                                _ => unreachable!("is_scroll only matches these two kinds"),
+                            }
+                        } else {
+                            let pos = Position { x: mouse.column, y: mouse.row };
+                            if let Some(tab) = hits.tabs.iter().find(|t| t.area.contains(pos)) {
+                                // Dashboard/room switching: a single click
+                                // acts immediately, no double-click needed.
+                                app.select_group(tab.index);
+                            } else if let Some(hit) = hits.rows.iter().find(|h| h.area.contains(pos)) {
+                                app.select(hit.card, hit.row);
+                                let is_double_click = last_row_click
+                                    .is_some_and(|(at, card, row)| card == hit.card && row == hit.row && at.elapsed() < DOUBLE_CLICK_WINDOW);
+                                if is_double_click {
+                                    dirty = activate_selected(app, &cmd_tx);
+                                    last_row_click = None;
+                                } else {
+                                    last_row_click = Some((Instant::now(), hit.card, hit.row));
                                 }
-                                _ => dirty = false,
+                            } else {
+                                dirty = false;
                             }
                         }
                     }
@@ -233,7 +263,7 @@ async fn main() -> Result<()> {
                     tui.draw(|frame| hits = ui::draw(frame, app))?;
                 }
                 None => {
-                    hits.clear();
+                    hits = ui::DrawHits::default();
                     tui.draw(ui::draw_connecting)?;
                 }
             }
