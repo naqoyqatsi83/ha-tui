@@ -307,6 +307,17 @@ impl AppState {
 
     // ---- grouping / navigation -----------------------------------------
 
+    /// Label for the left-hand tab panel: "Dashboard" when showing
+    /// configured/imported tabs (manual `[[tab]]` or Lovelace import),
+    /// "Rooms" when falling back to automatic room/domain grouping.
+    pub fn tabs_label(&self) -> &'static str {
+        if self.dashboard.is_empty() {
+            "Rooms"
+        } else {
+            "Dashboard"
+        }
+    }
+
     /// Entities grouped into named tabs, in display order. If the config
     /// defines explicit dashboard tabs, those are used verbatim (in their
     /// configured order, entity_ids not currently known to HA skipped);

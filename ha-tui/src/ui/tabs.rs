@@ -10,7 +10,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
 
     let items: Vec<ListItem> = app.group_names().into_iter().map(ListItem::new).collect();
 
-    let title = if filtering { "Rooms (search active)" } else { "Rooms" };
+    let label = app.tabs_label();
+    let title = if filtering { format!("{label} (search active)") } else { label.to_string() };
     let border_style = if filtering {
         Style::default().fg(Color::DarkGray)
     } else {
