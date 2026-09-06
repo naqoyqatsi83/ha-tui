@@ -1,13 +1,36 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::KeyEvent;
+use crossterm::event::{MouseButton, MouseEventKind};
 use ha_tui::app::action::{Action, FilterAction};
 use ha_tui::app::registry::Registry;
 use ha_tui::app::AppState;
 use ha_tui::ha::{Command, WsEvent};
+use ha_tui::input::InputEvent;
 use ha_tui::{config, ha, input, logging, terminal, ui};
+use ratatui::layout::Position;
 use tokio::sync::mpsc;
+
+/// Enter/Space on a row, or a mouse click landing on one (after `select`
+/// has already moved there): opens the detail chart for a graphed entity,
+/// otherwise toggles it. Shared so keyboard and mouse activation can never
+/// disagree about what "activating" a row does. Returns whether anything
+/// actually happened, for the caller's dirty-redraw tracking.
+fn activate_selected(app: &mut AppState, cmd_tx: &mpsc::UnboundedSender<Command>) -> bool {
+    let graphed = app.selected_entity().is_some_and(|e| app.is_graphed(&e.entity_id));
+    if graphed {
+        app.open_detail();
+        true
+    } else {
+        match app.toggle_selected() {
+            Some(cmd) => {
+                let _ = cmd_tx.send(cmd);
+                true
+            }
+            None => false,
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,7 +42,7 @@ async fn main() -> Result<()> {
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<WsEvent>();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Command>();
-    let (key_tx, mut key_rx) = mpsc::unbounded_channel::<KeyEvent>();
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<InputEvent>();
 
     tokio::spawn(ha::run(
         config.ha_url.clone(),
@@ -29,11 +52,16 @@ async fn main() -> Result<()> {
         event_tx,
         cmd_rx,
     ));
-    input::spawn(key_tx);
+    input::spawn(input_tx);
 
     let (_guard, mut tui) = terminal::TerminalGuard::init()?;
 
     let mut app: Option<AppState> = None;
+    // Screen positions of the entity rows drawn in the most recent frame,
+    // for mapping a mouse click back to a (card, row) selection - stale
+    // between draws, but a click always lands after the frame it's
+    // clicking on, so it's always in sync with what's actually on screen.
+    let mut hits: Vec<ui::RowHit> = Vec::new();
     // Only fires often enough to expire stale optimistic updates / status
     // messages (both on a 5s timeout) - not a general redraw tick.
     let mut expiry_tick = tokio::time::interval(Duration::from_millis(500));
@@ -82,79 +110,101 @@ async fn main() -> Result<()> {
                     None => break, // WS task ended (shouldn't happen; it retries forever)
                 }
             }
-            key = key_rx.recv() => {
-                let Some(key) = key else { break };
+            event = input_rx.recv() => {
+                let Some(event) = event else { break };
                 let Some(app) = &mut app else {
                     // No snapshot yet (still on the "Connecting..." screen)
-                    // - still quittable, everything else is a no-op.
-                    if Action::from_key(key) == Some(Action::Quit) {
+                    // - still quittable via keyboard, everything else
+                    // (including all mouse activity) is a no-op.
+                    if matches!(event, InputEvent::Key(key) if Action::from_key(key) == Some(Action::Quit)) {
                         break;
                     }
                     continue;
                 };
 
-                if app.show_help {
-                    // Any key dismisses the help overlay.
-                    app.close_help();
-                } else if app.detail_entity().is_some() {
-                    // Any key dismisses the detail chart popup.
-                    app.close_detail();
-                } else if app.is_filter_editing() {
-                    match FilterAction::from_key(key) {
-                        Some(FilterAction::Push(c)) => app.filter_push_char(c),
-                        Some(FilterAction::Backspace) => app.filter_backspace(),
-                        Some(FilterAction::Confirm) => app.confirm_filter(),
-                        Some(FilterAction::Cancel) => app.cancel_filter(),
-                        None => dirty = false,
-                    }
-                } else {
-                    // Column count must match what the card grid actually
-                    // rendered (a terminal-width-dependent layout detail
-                    // AppState doesn't otherwise track) so left/right and
-                    // the up/down panel-jump land on the right neighbor.
-                    let columns = ui::cards::columns_for(tui.size().map(|s| s.width).unwrap_or(80), app.visible_cards().len());
-                    match Action::from_key(key) {
-                        Some(Action::Quit) => break,
-                        Some(Action::MoveUp) => app.move_up(columns),
-                        Some(Action::MoveDown) => app.move_down(columns),
-                        Some(Action::MoveLeft) => app.move_left(columns),
-                        Some(Action::MoveRight) => app.move_right(columns),
-                        Some(Action::NextGroup) => app.next_group(),
-                        Some(Action::PrevGroup) => app.prev_group(),
-                        Some(Action::StartFilter) => app.start_filter(),
-                        Some(Action::ClearFilter) => {
-                            if app.is_filtering() {
-                                app.cancel_filter();
-                            } else {
-                                dirty = false;
+                match event {
+                    InputEvent::Key(key) => {
+                        if app.show_help {
+                            // Any key dismisses the help overlay.
+                            app.close_help();
+                        } else if app.detail_entity().is_some() {
+                            // Any key dismisses the detail chart popup.
+                            app.close_detail();
+                        } else if app.is_filter_editing() {
+                            match FilterAction::from_key(key) {
+                                Some(FilterAction::Push(c)) => app.filter_push_char(c),
+                                Some(FilterAction::Backspace) => app.filter_backspace(),
+                                Some(FilterAction::Confirm) => app.confirm_filter(),
+                                Some(FilterAction::Cancel) => app.cancel_filter(),
+                                None => dirty = false,
                             }
-                        }
-                        Some(Action::ShowHelp) => app.toggle_help(),
-                        Some(Action::Toggle) => {
-                            // Enter on a graphed row (a sensor with
-                            // history) opens its detail chart instead of
-                            // trying to toggle it - toggle_selected()
-                            // already no-ops for non-light/switch domains,
-                            // but this shows something useful instead.
-                            let graphed = app.selected_entity().is_some_and(|e| app.is_graphed(&e.entity_id));
-                            if graphed {
-                                app.open_detail();
-                            } else {
-                                match app.toggle_selected() {
+                        } else {
+                            // Column count must match what the card grid
+                            // actually rendered (a terminal-width-dependent
+                            // layout detail AppState doesn't otherwise
+                            // track) so left/right and the up/down
+                            // panel-jump land on the right neighbor.
+                            let columns = ui::cards::columns_for(tui.size().map(|s| s.width).unwrap_or(80), app.visible_cards().len());
+                            match Action::from_key(key) {
+                                Some(Action::Quit) => break,
+                                Some(Action::MoveUp) => app.move_up(columns),
+                                Some(Action::MoveDown) => app.move_down(columns),
+                                Some(Action::MoveLeft) => app.move_left(columns),
+                                Some(Action::MoveRight) => app.move_right(columns),
+                                Some(Action::NextGroup) => app.next_group(),
+                                Some(Action::PrevGroup) => app.prev_group(),
+                                Some(Action::StartFilter) => app.start_filter(),
+                                Some(Action::ClearFilter) => {
+                                    if app.is_filtering() {
+                                        app.cancel_filter();
+                                    } else {
+                                        dirty = false;
+                                    }
+                                }
+                                Some(Action::ShowHelp) => app.toggle_help(),
+                                Some(Action::Toggle) => {
+                                    dirty = activate_selected(app, &cmd_tx);
+                                }
+                                Some(Action::Increase) => match app.adjust_selected(1) {
                                     Some(cmd) => { let _ = cmd_tx.send(cmd); }
                                     None => dirty = false,
-                                }
+                                },
+                                Some(Action::Decrease) => match app.adjust_selected(-1) {
+                                    Some(cmd) => { let _ = cmd_tx.send(cmd); }
+                                    None => dirty = false,
+                                },
+                                None => dirty = false,
                             }
                         }
-                        Some(Action::Increase) => match app.adjust_selected(1) {
-                            Some(cmd) => { let _ = cmd_tx.send(cmd); }
-                            None => dirty = false,
-                        },
-                        Some(Action::Decrease) => match app.adjust_selected(-1) {
-                            Some(cmd) => { let _ = cmd_tx.send(cmd); }
-                            None => dirty = false,
-                        },
-                        None => dirty = false,
+                    }
+                    InputEvent::Mouse(mouse) => {
+                        if app.show_help {
+                            // Any click (or scroll) dismisses the help
+                            // overlay, mirroring "any key" for keyboard.
+                            app.close_help();
+                        } else if app.detail_entity().is_some() {
+                            app.close_detail();
+                        } else if app.is_filter_editing() {
+                            // The filter text box has no mouse affordances.
+                            dirty = false;
+                        } else {
+                            let columns = ui::cards::columns_for(tui.size().map(|s| s.width).unwrap_or(80), app.visible_cards().len());
+                            match mouse.kind {
+                                MouseEventKind::ScrollUp => app.move_up(columns),
+                                MouseEventKind::ScrollDown => app.move_down(columns),
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    let pos = Position { x: mouse.column, y: mouse.row };
+                                    match hits.iter().find(|hit| hit.area.contains(pos)) {
+                                        Some(hit) => {
+                                            app.select(hit.card, hit.row);
+                                            dirty = activate_selected(app, &cmd_tx);
+                                        }
+                                        None => dirty = false,
+                                    }
+                                }
+                                _ => dirty = false,
+                            }
+                        }
                     }
                 }
             }
@@ -180,9 +230,10 @@ async fn main() -> Result<()> {
         if dirty {
             match &app {
                 Some(app) => {
-                    tui.draw(|frame| ui::draw(frame, app))?;
+                    tui.draw(|frame| hits = ui::draw(frame, app))?;
                 }
                 None => {
+                    hits.clear();
                     tui.draw(ui::draw_connecting)?;
                 }
             }

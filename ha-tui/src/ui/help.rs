@@ -20,7 +20,9 @@ const LINES: &[&str] = &[
     "?              toggle this help",
     "q              quit",
     "",
-    "press any key to close",
+    "mouse: click a row to select and toggle it, scroll to move",
+    "",
+    "press any key or click to close",
 ];
 
 pub fn render(frame: &mut Frame) {

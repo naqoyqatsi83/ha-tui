@@ -4,6 +4,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
 use ratatui::Frame;
 
 use super::theme;
+use super::RowHit;
 use crate::app::entity::Entity;
 use crate::app::{AppState, ResolvedCard};
 
@@ -35,15 +36,16 @@ fn card_units(app: &AppState, card: &ResolvedCard) -> usize {
     card.entities.iter().map(|e| entity_units(app, e) as usize).sum()
 }
 
-pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
+pub fn render(frame: &mut Frame, area: Rect, app: &AppState) -> Vec<RowHit> {
     let cards = app.visible_cards();
+    let mut hits = Vec::new();
 
     if cards.is_empty() {
         let message = Paragraph::new("No entities here.")
             .style(Style::default().fg(theme::TEXT_DIM))
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER_DIM)));
         frame.render_widget(message, area);
-        return;
+        return hits;
     }
 
     let columns = columns_for(area.width, cards.len());
@@ -78,12 +80,22 @@ pub fn render(frame: &mut Frame, area: Rect, app: &AppState) {
                 continue;
             }
             let area = Rect { height, ..full };
-            render_card(frame, area, card, app, selected_row);
+            render_card(frame, area, card, app, global_idx, selected_row, &mut hits);
         }
     }
+
+    hits
 }
 
-fn render_card(frame: &mut Frame, area: Rect, card: &ResolvedCard, app: &AppState, selected_row: Option<usize>) {
+fn render_card(
+    frame: &mut Frame,
+    area: Rect,
+    card: &ResolvedCard,
+    app: &AppState,
+    card_idx: usize,
+    selected_row: Option<usize>,
+    hits: &mut Vec<RowHit>,
+) {
     let is_selected_panel = selected_row.is_some();
     let title = card.title.clone().unwrap_or_default();
     let mut block = Block::default()
@@ -149,6 +161,7 @@ fn render_card(frame: &mut Frame, area: Rect, card: &ResolvedCard, app: &AppStat
         }
         let row_area = Rect { x: inner.x, y, width: inner.width, height: h as u16 };
         render_entity_row(frame, row_area, entity, app, Some(i) == selected_row, name_width);
+        hits.push(RowHit { area: row_area, card: card_idx, row: i });
         y += h as u16;
         used += h;
         end = i + 1;

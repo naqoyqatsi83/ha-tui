@@ -811,6 +811,31 @@ impl AppState {
         }
     }
 
+    /// Selects `card`/`row` directly, e.g. a mouse click on a rendered
+    /// row - clamps `row` to that card's entity count the same way the
+    /// relative movement methods do. No-op if `card` (or, while filtering,
+    /// the flat result list) is empty or out of range.
+    pub fn select(&mut self, card: usize, row: usize) {
+        if self.filter.is_some() {
+            let len = self.filtered_entities().len();
+            if len == 0 {
+                return;
+            }
+            if let Some(f) = &mut self.filter {
+                f.selected = row.min(len - 1);
+            }
+            return;
+        }
+        let len = self.selected_tab_cards().get(card).map(|c| c.entities.len());
+        if let Some(len) = len {
+            if len == 0 {
+                return;
+            }
+            self.selected_card = card;
+            self.selected_row = row.min(len - 1);
+        }
+    }
+
     /// Selects `card`, keeping the same row index where it still fits.
     fn select_card(&mut self, card: usize) {
         let len = self.selected_tab_cards().get(card).map(|c| c.entities.len());
@@ -954,6 +979,40 @@ mod tests {
         assert_eq!(a.selected_group_name().as_deref(), Some("light"));
         // selection resets to the top of the group on group change
         assert_eq!(a.selected_entity().unwrap().entity_id, "light.a");
+    }
+
+    #[test]
+    fn select_jumps_directly_to_a_card_and_row_and_clamps_out_of_range_rows() {
+        let mut a = grid_of_four_single_entity_cards();
+        a.select(2, 0);
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.c");
+
+        // Card 2 only has one entity (index 0) - row 5 clamps down to it.
+        a.select(2, 5);
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.c");
+    }
+
+    #[test]
+    fn select_is_a_noop_for_an_out_of_range_card() {
+        let mut a = grid_of_four_single_entity_cards();
+        a.select(2, 0);
+        a.select(99, 0);
+        // Out-of-range card index is ignored - selection stays put.
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.c");
+    }
+
+    #[test]
+    fn select_targets_the_flat_filtered_list_while_filtering() {
+        let mut a = app(
+            vec![state("light.a_lamp", "on"), state("light.b_lamp", "on")],
+            Registry::default(),
+        );
+        a.start_filter();
+        for c in "lamp".chars() {
+            a.filter_push_char(c);
+        }
+        a.select(0, 1);
+        assert_eq!(a.selected_entity().unwrap().entity_id, "light.b_lamp");
     }
 
     #[test]
