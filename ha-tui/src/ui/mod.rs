@@ -1,4 +1,5 @@
 pub mod cards;
+pub mod detail;
 pub mod help;
 pub mod tabs;
 pub mod theme;
@@ -41,7 +42,9 @@ pub fn draw(frame: &mut Frame, app: &AppState) {
     };
     frame.render_widget(status_line, inner);
 
-    if app.show_help {
+    if let Some(entity_id) = app.detail_entity() {
+        detail::render(frame, app, entity_id);
+    } else if app.show_help {
         help::render(frame);
     }
 }

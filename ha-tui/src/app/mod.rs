@@ -80,6 +80,9 @@ pub struct AppState {
     /// Which entity row is selected within `selected_card`.
     pub selected_row: usize,
     pub show_help: bool,
+    /// entity_id of a graphed entity currently shown in the detail chart
+    /// popup (opened via Enter on a graphed row), if any.
+    detail_entity: Option<String>,
     dashboard: Vec<DashboardTab>,
     filter: Option<FilterState>,
     pending: HashMap<String, Pending>,
@@ -111,6 +114,7 @@ impl AppState {
             selected_card: 0,
             selected_row: 0,
             show_help: false,
+            detail_entity: None,
             dashboard,
             filter: None,
             pending: HashMap::new(),
@@ -201,6 +205,16 @@ impl AppState {
         buf.iter().map(|v| (((v - min) / (max - min)) * 100.0).round() as u64).collect()
     }
 
+    /// Raw (index, value) points for `entity_id`'s history, for the
+    /// detail chart - unlike `sparkline_data`, not normalized, since the
+    /// chart draws its own real-valued Y axis.
+    pub fn history_points(&self, entity_id: &str) -> Vec<(f64, f64)> {
+        self.history
+            .get(entity_id)
+            .map(|buf| buf.iter().enumerate().map(|(i, v)| (i as f64, *v)).collect())
+            .unwrap_or_default()
+    }
+
     /// Whether `entity_id`'s state changed recently enough to still show
     /// the brief highlight flash.
     pub fn is_recently_changed(&self, entity_id: &str) -> bool {
@@ -238,6 +252,26 @@ impl AppState {
 
     pub fn close_help(&mut self) {
         self.show_help = false;
+    }
+
+    /// Enter on a graphed row: opens the detail chart popup for the
+    /// selected entity. No-op if the selection isn't a graphed entity
+    /// (the caller should fall back to toggling it instead).
+    pub fn open_detail(&mut self) {
+        let id = self.selected_entity().map(|e| e.entity_id.clone());
+        if let Some(id) = id {
+            if self.graph_entity_ids.contains(&id) {
+                self.detail_entity = Some(id);
+            }
+        }
+    }
+
+    pub fn close_detail(&mut self) {
+        self.detail_entity = None;
+    }
+
+    pub fn detail_entity(&self) -> Option<&str> {
+        self.detail_entity.as_deref()
     }
 
     // ---- filter / search -------------------------------------------------
@@ -1237,6 +1271,41 @@ mod tests {
         assert!(a.show_help);
         a.close_help();
         assert!(!a.show_help);
+    }
+
+    #[test]
+    fn open_detail_opens_only_for_a_graphed_selection() {
+        let mut tab = DashboardTab::new("Home", vec![]);
+        tab.cards = vec![crate::config::DashboardCard {
+            title: None,
+            entity_ids: vec!["sensor.temp".into()],
+            graph_entity_ids: vec!["sensor.temp".into()],
+        }];
+        let mut a = AppState::new(vec![state("sensor.temp", "20")], Registry::default(), vec![tab]);
+
+        assert_eq!(a.detail_entity(), None);
+        a.open_detail();
+        assert_eq!(a.detail_entity(), Some("sensor.temp"));
+        a.close_detail();
+        assert_eq!(a.detail_entity(), None);
+    }
+
+    #[test]
+    fn open_detail_is_a_noop_for_a_non_graphed_selection() {
+        let mut a = app(vec![state("light.a", "on")], Registry::default());
+        a.open_detail();
+        assert_eq!(a.detail_entity(), None);
+    }
+
+    #[test]
+    fn history_points_are_index_value_pairs_in_order() {
+        let mut a = app_with_graphed_sensor();
+        let mut history = HashMap::new();
+        history.insert("sensor.temp".to_string(), vec![10.0, 20.0, 30.0]);
+        a.apply_history(history);
+
+        assert_eq!(a.history_points("sensor.temp"), vec![(0.0, 10.0), (1.0, 20.0), (2.0, 30.0)]);
+        assert_eq!(a.history_points("sensor.unknown"), vec![]);
     }
 
     #[test]

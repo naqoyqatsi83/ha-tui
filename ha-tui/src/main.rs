@@ -96,6 +96,9 @@ async fn main() -> Result<()> {
                 if app.show_help {
                     // Any key dismisses the help overlay.
                     app.close_help();
+                } else if app.detail_entity().is_some() {
+                    // Any key dismisses the detail chart popup.
+                    app.close_detail();
                 } else if app.is_filter_editing() {
                     match FilterAction::from_key(key) {
                         Some(FilterAction::Push(c)) => app.filter_push_char(c),
@@ -127,10 +130,22 @@ async fn main() -> Result<()> {
                             }
                         }
                         Some(Action::ShowHelp) => app.toggle_help(),
-                        Some(Action::Toggle) => match app.toggle_selected() {
-                            Some(cmd) => { let _ = cmd_tx.send(cmd); }
-                            None => dirty = false,
-                        },
+                        Some(Action::Toggle) => {
+                            // Enter on a graphed row (a sensor with
+                            // history) opens its detail chart instead of
+                            // trying to toggle it - toggle_selected()
+                            // already no-ops for non-light/switch domains,
+                            // but this shows something useful instead.
+                            let graphed = app.selected_entity().is_some_and(|e| app.is_graphed(&e.entity_id));
+                            if graphed {
+                                app.open_detail();
+                            } else {
+                                match app.toggle_selected() {
+                                    Some(cmd) => { let _ = cmd_tx.send(cmd); }
+                                    None => dirty = false,
+                                }
+                            }
+                        }
                         Some(Action::Increase) => match app.adjust_selected(1) {
                             Some(cmd) => { let _ = cmd_tx.send(cmd); }
                             None => dirty = false,

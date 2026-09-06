@@ -107,38 +107,60 @@ fn render_card(frame: &mut Frame, area: Rect, card: &ResolvedCard, app: &AppStat
     let name_width = (inner_width * 55 / 100).clamp(10, inner_width.saturating_sub(4).max(10));
 
     // Fit as many entities as the card's height (in row-units - a graphed
-    // entity takes 2) allows, reserving one line for "+N more" if not all
-    // fit.
+    // entity takes 2) allows, reserving a line for "N above"/"N more"
+    // indicators if not everything fits. Scrolls just far enough that the
+    // selected row (if any) is actually visible - otherwise selecting
+    // into the overflow via j/k would never show what got selected.
     let capacity = inner.height as usize;
-    let mut visible: Vec<(usize, &Entity, u16)> = Vec::new();
-    let mut used = 0usize;
-    for (i, entity) in card.entities.iter().enumerate() {
-        let units = entity_units(app, entity) as usize;
-        if used + units > capacity {
-            break;
+    let units: Vec<usize> = card.entities.iter().map(|e| entity_units(app, e) as usize).collect();
+
+    // Smallest start such that entities[start..=selected] fit in the full
+    // capacity (indicator reservations are handled separately below).
+    let start = match selected_row {
+        Some(sel) if sel < units.len() => {
+            let mut start = 0;
+            while start < sel && units[start..=sel].iter().sum::<usize>() > capacity {
+                start += 1;
+            }
+            start
         }
-        visible.push((i, entity, units as u16));
-        used += units;
-    }
-    let truncated = visible.len() < card.entities.len();
-    if truncated {
-        while used + 1 > capacity {
-            let Some((_, _, units)) = visible.pop() else { break };
-            used -= units as usize;
-        }
-    }
+        _ => 0,
+    };
 
     let mut y = inner.y;
-    for (i, entity, units) in &visible {
-        let row_area = Rect { x: inner.x, y, width: inner.width, height: *units };
-        let is_selected = selected_row == Some(*i);
-        render_entity_row(frame, row_area, entity, app, is_selected, name_width);
-        y += units;
-    }
-    if truncated {
-        let hidden = card.entities.len() - visible.len();
+    if start > 0 {
         let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
-        frame.render_widget(Paragraph::new(format!("+{hidden} more")).style(Style::default().fg(theme::TEXT_DIM)), rect);
+        frame.render_widget(Paragraph::new(format!("↑ {start} above")).style(Style::default().fg(theme::TEXT_DIM)), rect);
+        y += 1;
+    }
+    let budget = capacity.saturating_sub(if start > 0 { 1 } else { 0 });
+
+    let mut used = 0usize;
+    let mut end = start;
+    let last_index = card.entities.len() - 1;
+    for (i, (entity, &h)) in card.entities.iter().zip(units.iter()).enumerate().skip(start) {
+        // Reserve a line for a "below" indicator unless this is the last
+        // entity - except for the selected row itself, which must be
+        // shown regardless (it was already guaranteed to fit within the
+        // full capacity by the `start` search above).
+        let reserve = if i == last_index || Some(i) == selected_row { 0 } else { 1 };
+        if used + h + reserve > budget {
+            break;
+        }
+        let row_area = Rect { x: inner.x, y, width: inner.width, height: h as u16 };
+        render_entity_row(frame, row_area, entity, app, Some(i) == selected_row, name_width);
+        y += h as u16;
+        used += h;
+        end = i + 1;
+    }
+
+    let below_hidden = card.entities.len() - end;
+    if below_hidden > 0 {
+        let rect = Rect { x: inner.x, y, width: inner.width, height: 1 };
+        frame.render_widget(
+            Paragraph::new(format!("+{below_hidden} more (↓ to see)")).style(Style::default().fg(theme::TEXT_DIM)),
+            rect,
+        );
     }
 }
 
