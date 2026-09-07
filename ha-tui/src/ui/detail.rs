@@ -56,16 +56,22 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
 
     // Every other graphed card-mate's own history, already put on this
     // chart's time axis (`series.oldest()`) so it lines up with `entity_id`'s
-    // points regardless of when each entity's buffer actually started.
+    // points regardless of when each entity's buffer actually started. A
+    // mate needs only one point (not two, unlike `history_series` for the
+    // primary entity below) to still appear - a slow-changing sensor like
+    // a battery level often has just one recorded point over the window
+    // (HA's history only stores changes, and it may not have changed at
+    // all), and it should still show up as a flat reference/legend entry
+    // rather than silently vanishing from an otherwise multi-line chart.
     let same_unit_series: Vec<(&Entity, Vec<(f64, f64)>)> = same_unit
         .into_iter()
         .map(|e| (e, app.history_points_since(&e.entity_id, series.oldest())))
-        .filter(|(_, pts)| pts.len() >= 2)
+        .filter(|(_, pts)| !pts.is_empty())
         .collect();
     let other_unit_series: Vec<(&Entity, Vec<(f64, f64)>)> = other_unit
         .into_iter()
         .map(|e| (e, app.history_points_since(&e.entity_id, series.oldest())))
-        .filter(|(_, pts)| pts.len() >= 2)
+        .filter(|(_, pts)| !pts.is_empty())
         .collect();
 
     let x_tick_count = ((area.width / 12).clamp(2, 8)) as usize;
@@ -241,5 +247,60 @@ fn centered_percent(area: Rect, width_pct: u16, height_pct: u16) -> Rect {
         y: area.y + (area.height.saturating_sub(height)) / 2,
         width,
         height,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::registry::Registry;
+    use crate::config::{DashboardCard, DashboardTab};
+    use crate::ha::StateObject;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::collections::HashMap;
+
+    fn state(entity_id: &str, value: &str, unit: &str) -> StateObject {
+        serde_json::from_value(serde_json::json!({
+            "entity_id": entity_id,
+            "state": value,
+            "attributes": {"unit_of_measurement": unit},
+            "last_updated": null,
+            "last_changed": null,
+        }))
+        .unwrap()
+    }
+
+    /// A slow-changing sensor like a battery level often has just one
+    /// recorded point over the history window (HA only stores changes,
+    /// and it may not have changed at all) - it should still appear in a
+    /// combined multi-series popup instead of silently vanishing because
+    /// there's no "line" to draw for it.
+    #[test]
+    fn a_card_mate_with_only_one_history_point_still_appears() {
+        let mut tab = DashboardTab::new("Home", vec![]);
+        tab.cards = vec![DashboardCard {
+            title: Some("Kitchen".into()),
+            entity_ids: vec!["sensor.temp".into(), "sensor.battery".into()],
+            graph_entity_ids: vec!["sensor.temp".into(), "sensor.battery".into()],
+        }];
+        let mut app = AppState::new(
+            vec![state("sensor.temp", "22.0", "°C"), state("sensor.battery", "92", "%")],
+            Registry::default(),
+            vec![tab],
+        );
+        let mut history = HashMap::new();
+        history.insert("sensor.temp".to_string(), vec![(0.0, 20.0), (30.0, 22.0), (60.0, 24.0)]);
+        history.insert("sensor.battery".to_string(), vec![(30.0, 92.0)]); // just one point
+        app.apply_history(history);
+
+        // Large enough that `Chart` actually has room to draw its legend
+        // (it hides the legend rather than cramming it into a tiny area).
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(frame, &app, "sensor.temp")).unwrap();
+
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("sensor.battery"), "expected the one-point card-mate to still be named somewhere (e.g. the legend): {text}");
     }
 }
