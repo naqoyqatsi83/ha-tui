@@ -83,6 +83,11 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
         return;
     };
 
+    let x_tick_count = ((area.width / 12).clamp(2, 8)) as usize;
+    let y_tick_count = ((area.height / 4).clamp(2, 6)) as usize;
+    let x_labels = series.time_labels(x_tick_count);
+    let x_max = series.points.last().map(|p| p.0).unwrap_or(0.0);
+
     let primary_unit = unit_of(app, entity_id);
     let mates = app.detail_group();
     let (same_unit, other_unit): (Vec<&Entity>, Vec<&Entity>) = mates.into_iter().partition(|e| unit_of_entity(e) == primary_unit);
@@ -96,21 +101,24 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
     // (HA's history only stores changes, and it may not have changed at
     // all), and it should still show up as a flat reference/legend entry
     // rather than silently vanishing from an otherwise multi-line chart.
+    //
+    // Each point's elapsed time is also clamped into [0, x_max] - a mate's
+    // history can easily predate `entity_id`'s own oldest point (e.g. HA's
+    // `history_during_period` handing back a battery sensor's actual last
+    // change from days ago, rather than clamping it to the query window),
+    // and an unclamped point there would plot off the left edge of the
+    // chart's bounds and never actually be visible, even though it's
+    // technically "there" in the dataset and the legend.
     let same_unit_series: Vec<(&Entity, Vec<(f64, f64)>)> = same_unit
         .into_iter()
-        .map(|e| (e, app.history_points_since(&e.entity_id, series.oldest())))
+        .map(|e| (e, clamp_points(app.history_points_since(&e.entity_id, series.oldest()), x_max)))
         .filter(|(_, pts)| !pts.is_empty())
         .collect();
     let other_unit_series: Vec<(&Entity, Vec<(f64, f64)>)> = other_unit
         .into_iter()
-        .map(|e| (e, app.history_points_since(&e.entity_id, series.oldest())))
+        .map(|e| (e, clamp_points(app.history_points_since(&e.entity_id, series.oldest()), x_max)))
         .filter(|(_, pts)| !pts.is_empty())
         .collect();
-
-    let x_tick_count = ((area.width / 12).clamp(2, 8)) as usize;
-    let y_tick_count = ((area.height / 4).clamp(2, 6)) as usize;
-    let x_labels = series.time_labels(x_tick_count);
-    let x_max = series.points.last().map(|p| p.0).unwrap_or(0.0);
 
     // The primary (left) axis's range covers `entity_id` and every
     // same-unit card-mate - they share one real scale, no rescaling needed.
@@ -227,6 +235,13 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
     if let Some((sec_min, sec_max)) = secondary_bounds {
         render_secondary_gutter(frame, area, chart_area, y_tick_count, sec_min, sec_max, secondary_unit.as_deref());
     }
+}
+
+/// Clamps every point's elapsed-time (x) into `[0, x_max]`, the chart's
+/// own visible time bounds - see the call site for why a card-mate's
+/// points can otherwise land outside them and never actually be seen.
+fn clamp_points(points: Vec<(f64, f64)>, x_max: f64) -> Vec<(f64, f64)> {
+    points.into_iter().map(|(x, v)| (x.clamp(0.0, x_max), v)).collect()
 }
 
 /// (min, max) of an f64 iterator, widened to a visible +-1 span if every
@@ -369,6 +384,17 @@ mod tests {
     /// and it may not have changed at all) - it should still appear in a
     /// combined multi-series popup instead of silently vanishing because
     /// there's no "line" to draw for it.
+    #[test]
+    fn clamp_points_pulls_out_of_range_points_back_into_the_visible_span() {
+        // Mirrors a slow-changing sensor (e.g. battery) whose actual last
+        // recorded change predates the primary entity's own oldest point -
+        // HA's history API doesn't clamp a "no change since before the
+        // query window" value to the window start, so left unclamped this
+        // would plot off the left edge of the chart and never be seen.
+        let points = vec![(-500.0, 10.0), (5.0, 20.0), (999.0, 30.0)];
+        assert_eq!(clamp_points(points, 100.0), vec![(0.0, 10.0), (5.0, 20.0), (100.0, 30.0)]);
+    }
+
     #[test]
     fn a_card_mate_with_only_one_history_point_still_appears() {
         let mut tab = DashboardTab::new("Home", vec![]);
