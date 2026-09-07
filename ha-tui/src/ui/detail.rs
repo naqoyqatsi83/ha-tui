@@ -8,10 +8,20 @@ use super::theme;
 use crate::app::entity::Entity;
 use crate::app::AppState;
 
-/// Colors cycled across a multi-series chart's lines. The first (green)
-/// matches the single-series chart's own color, so a card with no other
-/// graphed entities still renders exactly as before.
-const SERIES_COLORS: [Color; 5] = [theme::ON, theme::ACCENT, Color::Rgb(120, 170, 210), Color::Rgb(190, 130, 190), Color::Rgb(210, 150, 150)];
+/// A measurement's line always gets the same color regardless of chart
+/// position, so temperature/humidity/battery read consistently across
+/// every popup rather than shuffling with whichever row happened to be
+/// activated. Checked against `device_class` first (HA's own controlled
+/// vocabulary), falling back to matching the entity_id/friendly_name for
+/// dashboards that don't set it.
+const TEMPERATURE_COLOR: Color = Color::Rgb(230, 160, 60); // amber/orange
+const HUMIDITY_COLOR: Color = Color::Rgb(90, 160, 220); // blue
+const BATTERY_COLOR: Color = Color::Rgb(210, 90, 90); // red
+/// Cycled for any entity that isn't one of the three recognized kinds
+/// above. The first (green) matches the single-series chart's own
+/// original color, so an unrecognized primary entity with no card-mates
+/// still renders exactly as before.
+const OTHER_COLORS: [Color; 3] = [theme::ON, Color::Rgb(190, 130, 190), Color::Rgb(150, 150, 150)];
 
 fn unit_of(app: &AppState, entity_id: &str) -> Option<String> {
     app.entities.get(entity_id).and_then(unit_of_entity)
@@ -19,6 +29,29 @@ fn unit_of(app: &AppState, entity_id: &str) -> Option<String> {
 
 fn unit_of_entity(entity: &Entity) -> Option<String> {
     entity.as_sensor().and_then(|s| s.unit().map(str::to_string))
+}
+
+/// This entity's chart line color, by recognized measurement kind - not
+/// its position among the chart's datasets.
+fn color_for(entity: &Entity, other_colors: &mut impl Iterator<Item = Color>) -> Color {
+    if let Some(device_class) = entity.attributes.get("device_class").and_then(|v| v.as_str()) {
+        match device_class {
+            "temperature" => return TEMPERATURE_COLOR,
+            "humidity" => return HUMIDITY_COLOR,
+            "battery" => return BATTERY_COLOR,
+            _ => {}
+        }
+    }
+    let haystack = format!("{} {}", entity.entity_id, entity.friendly_name()).to_lowercase();
+    if haystack.contains("temperature") {
+        TEMPERATURE_COLOR
+    } else if haystack.contains("humidity") {
+        HUMIDITY_COLOR
+    } else if haystack.contains("battery") {
+        BATTERY_COLOR
+    } else {
+        other_colors.next().unwrap()
+    }
 }
 
 /// Centered popup with a full X/Y-axis line chart of `entity_id`'s
@@ -117,12 +150,13 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
     let secondary_unit = other_unit_series.first().and_then(|(e, _)| unit_of_entity(e));
 
     let has_other_series = !same_unit_series.is_empty() || !rescaled_other.is_empty();
-    let mut colors = SERIES_COLORS.iter().cycle();
+    let mut other_colors = OTHER_COLORS.iter().copied().cycle();
     let mut datasets = vec![{
+        let color = app.entities.get(entity_id).map(|e| color_for(e, &mut other_colors)).unwrap_or(theme::ON);
         let mut d = Dataset::default()
             .marker(symbols::Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Style::default().fg(*colors.next().unwrap()))
+            .style(Style::default().fg(color))
             .data(&series.points);
         if has_other_series {
             d = d.name(name.to_string());
@@ -134,7 +168,7 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
             Dataset::default()
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(*colors.next().unwrap()))
+                .style(Style::default().fg(color_for(e, &mut other_colors)))
                 .name(e.friendly_name().to_string())
                 .data(pts),
         );
@@ -144,7 +178,7 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
             Dataset::default()
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(*colors.next().unwrap()))
+                .style(Style::default().fg(color_for(e, &mut other_colors)))
                 .name(e.friendly_name().to_string())
                 .data(pts),
         );
@@ -286,6 +320,48 @@ mod tests {
             "last_changed": null,
         }))
         .unwrap()
+    }
+
+    fn entity(entity_id: &str, device_class: Option<&str>) -> Entity {
+        let mut attributes = serde_json::json!({"friendly_name": entity_id});
+        if let Some(dc) = device_class {
+            attributes["device_class"] = dc.into();
+        }
+        Entity::from_state(
+            serde_json::from_value(serde_json::json!({
+                "entity_id": entity_id,
+                "state": "1",
+                "attributes": attributes,
+                "last_updated": null,
+                "last_changed": null,
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn color_for_recognizes_device_class_regardless_of_name() {
+        let mut others = OTHER_COLORS.iter().copied().cycle();
+        assert_eq!(color_for(&entity("sensor.foo", Some("temperature")), &mut others), TEMPERATURE_COLOR);
+        assert_eq!(color_for(&entity("sensor.bar", Some("humidity")), &mut others), HUMIDITY_COLOR);
+        assert_eq!(color_for(&entity("sensor.baz", Some("battery")), &mut others), BATTERY_COLOR);
+    }
+
+    #[test]
+    fn color_for_falls_back_to_matching_the_entity_id_or_name() {
+        // Mirrors dashboards (like an imported apexcharts-card) whose
+        // series entries don't set `device_class` at all.
+        let mut others = OTHER_COLORS.iter().copied().cycle();
+        assert_eq!(color_for(&entity("sensor.kitchen_ble_temperature", None), &mut others), TEMPERATURE_COLOR);
+        assert_eq!(color_for(&entity("sensor.kitchen_ble_humidity", None), &mut others), HUMIDITY_COLOR);
+        assert_eq!(color_for(&entity("sensor.kitchen_ble_battery", None), &mut others), BATTERY_COLOR);
+    }
+
+    #[test]
+    fn color_for_cycles_the_fallback_palette_for_unrecognized_sensors() {
+        let mut others = OTHER_COLORS.iter().copied().cycle();
+        assert_eq!(color_for(&entity("sensor.co2", None), &mut others), OTHER_COLORS[0]);
+        assert_eq!(color_for(&entity("sensor.pressure", None), &mut others), OTHER_COLORS[1]);
     }
 
     /// A slow-changing sensor like a battery level often has just one
