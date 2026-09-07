@@ -42,6 +42,7 @@ No web server, no browser, no polling REST endpoints. Just a single binary and a
 - **Lovelace mirroring** — imports your dashboard's views and cards on startup (`import_lovelace = true`), so tabs and card grids match what you already built in HA; falls back to a config-defined layout when disabled
 - **Live state, live control** — entity states update in real time over the WebSocket event stream; toggle switches, lights, and other controllable entities directly from the grid
 - **History sparklines** — numeric sensors render an inline sparkline pulled from `history/history_during_period`; press `Enter` on a card for a full detail popup with a real time-axis chart
+- **Multi-series detail charts** — opening a card that groups several graphed sensors (e.g. an imported apexcharts-card plotting temperature alongside humidity/battery) plots all of them together: same-unit sensors share one axis, a different-unit group gets its own axis on the right
 - **2D panel navigation** — arrow keys move through the card grid spatially (up/down/left/right), not just in list order
 - **Mouse support** — click a tab to switch dashboards, click a row to select it, double-click to activate it (toggle, or open its history chart), scroll to move within a panel; `F2` turns mouse capture off/on so normal terminal text selection/copy still works when you need it
 - **Multi-dashboard tabs** — switch between views (Overview, Network, Climate, whatever your Lovelace config defines) with animated tab transitions

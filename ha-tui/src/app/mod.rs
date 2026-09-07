@@ -54,6 +54,14 @@ impl HistorySeries {
             })
             .collect()
     }
+
+    /// The unix timestamp `points[0]`'s elapsed-seconds-0 is relative to -
+    /// lets a caller put another entity's own history on this same time
+    /// axis via `AppState::history_points_since`, for a combined
+    /// multi-series detail chart.
+    pub fn oldest(&self) -> f64 {
+        self.oldest
+    }
 }
 
 fn unix_now() -> f64 {
@@ -274,6 +282,37 @@ impl AppState {
             points: buf.iter().map(|p| (p.at - oldest, p.value)).collect(),
             oldest,
         })
+    }
+
+    /// `entity_id`'s history as (elapsed-seconds-since-`oldest`, value)
+    /// pairs, for plotting alongside another entity's `history_series` on
+    /// one shared time axis (a combined multi-series detail chart) - unlike
+    /// `history_series`, the elapsed-time origin is given by the caller
+    /// rather than taken from this entity's own oldest point, since two
+    /// entities' history buffers rarely start at exactly the same instant.
+    pub fn history_points_since(&self, entity_id: &str, oldest: f64) -> Vec<(f64, f64)> {
+        self.history.get(entity_id).map(|buf| buf.iter().map(|p| (p.at - oldest, p.value)).collect()).unwrap_or_default()
+    }
+
+    /// Other graphed entities sharing `entity_id`'s dashboard card - e.g.
+    /// an imported apexcharts-card plotting temperature alongside humidity
+    /// and battery on one chart - so the detail popup can plot them
+    /// together instead of just the one row that was activated. Looks at
+    /// the real dashboard structure (`tabs()`), not `visible_cards()`,
+    /// since an active filter collapses everything into one synthetic
+    /// card that isn't what the entity was actually grouped under.
+    pub fn card_mates(&self, entity_id: &str) -> Vec<&Entity> {
+        for (_, cards) in self.tabs() {
+            if let Some(card) = cards.iter().find(|c| c.entities.iter().any(|e| e.entity_id == entity_id)) {
+                return card
+                    .entities
+                    .iter()
+                    .filter(|e| e.entity_id != entity_id && self.graph_entity_ids.contains(&e.entity_id))
+                    .copied()
+                    .collect();
+            }
+        }
+        Vec::new()
     }
 
     /// Whether `entity_id`'s state changed recently enough to still show
@@ -1527,6 +1566,51 @@ mod tests {
         let a = app_with_graphed_sensor();
         assert!(a.is_graphed("sensor.temp"));
         assert!(!a.is_graphed("sensor.other"));
+    }
+
+    #[test]
+    fn card_mates_returns_other_graphed_entities_in_the_same_card() {
+        // Mirrors an imported apexcharts-card plotting three sensors
+        // together: temperature alone on one axis, humidity/battery
+        // sharing another - "not_graphed" is a fourth card entity that
+        // isn't flagged as graphed, so it shouldn't show up as a mate.
+        let mut tab = DashboardTab::new("Home", vec![]);
+        tab.cards = vec![crate::config::DashboardCard {
+            title: Some("Kitchen".into()),
+            entity_ids: vec!["sensor.temp".into(), "sensor.humidity".into(), "sensor.battery".into(), "sensor.not_graphed".into()],
+            graph_entity_ids: vec!["sensor.temp".into(), "sensor.humidity".into(), "sensor.battery".into()],
+        }];
+        let states = vec![
+            state("sensor.temp", "22"),
+            state("sensor.humidity", "41"),
+            state("sensor.battery", "92"),
+            state("sensor.not_graphed", "1"),
+        ];
+        let a = AppState::new(states, Registry::default(), vec![tab]);
+
+        let mates: Vec<&str> = a.card_mates("sensor.temp").iter().map(|e| e.entity_id.as_str()).collect();
+        assert_eq!(mates.len(), 2);
+        assert!(mates.contains(&"sensor.humidity"));
+        assert!(mates.contains(&"sensor.battery"));
+        assert!(!mates.contains(&"sensor.not_graphed"));
+
+        // An entity outside any dashboard card (or not found at all) has
+        // no mates.
+        assert!(a.card_mates("sensor.unknown").is_empty());
+    }
+
+    #[test]
+    fn history_points_since_rebases_elapsed_time_onto_a_given_origin() {
+        let mut a = app_with_graphed_sensor();
+        let mut history = HashMap::new();
+        history.insert("sensor.temp".to_string(), vec![(100.0, 10.0), (130.0, 20.0), (190.0, 30.0)]);
+        a.apply_history(history);
+
+        // Same points as `history_series` would give with oldest=100, but
+        // rebased onto an earlier origin (as if a card-mate's own history
+        // started 40s before this entity's).
+        assert_eq!(a.history_points_since("sensor.temp", 60.0), vec![(40.0, 10.0), (70.0, 20.0), (130.0, 30.0)]);
+        assert!(a.history_points_since("sensor.unknown", 60.0).is_empty());
     }
 
     #[test]
