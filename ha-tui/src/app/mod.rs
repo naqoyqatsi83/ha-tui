@@ -142,6 +142,9 @@ pub struct AppState {
     /// entity_id of a graphed entity currently shown in the detail chart
     /// popup (opened via Enter on a graphed row), if any.
     detail_entity: Option<String>,
+    /// Other graphed entities from `detail_entity`'s on-screen card at the
+    /// moment it was opened - see `open_detail`.
+    detail_group: Vec<String>,
     dashboard: Vec<DashboardTab>,
     filter: Option<FilterState>,
     pending: HashMap<String, Pending>,
@@ -174,6 +177,7 @@ impl AppState {
             selected_row: 0,
             show_help: false,
             detail_entity: None,
+            detail_group: Vec::new(),
             dashboard,
             filter: None,
             pending: HashMap::new(),
@@ -294,25 +298,12 @@ impl AppState {
         self.history.get(entity_id).map(|buf| buf.iter().map(|p| (p.at - oldest, p.value)).collect()).unwrap_or_default()
     }
 
-    /// Other graphed entities sharing `entity_id`'s dashboard card - e.g.
-    /// an imported apexcharts-card plotting temperature alongside humidity
-    /// and battery on one chart - so the detail popup can plot them
-    /// together instead of just the one row that was activated. Looks at
-    /// the real dashboard structure (`tabs()`), not `visible_cards()`,
-    /// since an active filter collapses everything into one synthetic
-    /// card that isn't what the entity was actually grouped under.
-    pub fn card_mates(&self, entity_id: &str) -> Vec<&Entity> {
-        for (_, cards) in self.tabs() {
-            if let Some(card) = cards.iter().find(|c| c.entities.iter().any(|e| e.entity_id == entity_id)) {
-                return card
-                    .entities
-                    .iter()
-                    .filter(|e| e.entity_id != entity_id && self.graph_entity_ids.contains(&e.entity_id))
-                    .copied()
-                    .collect();
-            }
-        }
-        Vec::new()
+    /// Other graphed entities from `detail_entity`'s card, snapshotted by
+    /// `open_detail` - e.g. an imported apexcharts-card plotting
+    /// temperature alongside humidity and battery, so the detail popup can
+    /// plot them together instead of just the one row that was activated.
+    pub fn detail_group(&self) -> Vec<&Entity> {
+        self.detail_group.iter().filter_map(|id| self.entities.get(id)).collect()
     }
 
     /// Whether `entity_id`'s state changed recently enough to still show
@@ -357,17 +348,38 @@ impl AppState {
     /// Enter on a graphed row: opens the detail chart popup for the
     /// selected entity. No-op if the selection isn't a graphed entity
     /// (the caller should fall back to toggling it instead).
+    ///
+    /// Also snapshots the *other* graphed entities in the same on-screen
+    /// card right now, rather than having the detail popup re-derive them
+    /// later by searching the whole dashboard for "a card containing this
+    /// entity" - the same entity can appear in more than one imported
+    /// Lovelace view (e.g. a quick two-sensor "Glance" card alongside a
+    /// fuller room card that also graphs battery), and a global search
+    /// would risk silently landing on a different, narrower grouping than
+    /// the one actually on screen when the user opened this.
     pub fn open_detail(&mut self) {
-        let id = self.selected_entity().map(|e| e.entity_id.clone());
-        if let Some(id) = id {
-            if self.graph_entity_ids.contains(&id) {
-                self.detail_entity = Some(id);
-            }
+        let Some(id) = self.selected_entity().map(|e| e.entity_id.clone()) else {
+            return;
+        };
+        if !self.graph_entity_ids.contains(&id) {
+            return;
         }
+        self.detail_group = self
+            .visible_cards()
+            .into_iter()
+            .nth(self.selected_position().0)
+            .map(|c| c.entities)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.entity_id != id && self.graph_entity_ids.contains(&e.entity_id))
+            .map(|e| e.entity_id.clone())
+            .collect();
+        self.detail_entity = Some(id);
     }
 
     pub fn close_detail(&mut self) {
         self.detail_entity = None;
+        self.detail_group.clear();
     }
 
     pub fn detail_entity(&self) -> Option<&str> {
@@ -1569,11 +1581,11 @@ mod tests {
     }
 
     #[test]
-    fn card_mates_returns_other_graphed_entities_in_the_same_card() {
+    fn open_detail_snapshots_other_graphed_entities_from_the_same_card() {
         // Mirrors an imported apexcharts-card plotting three sensors
         // together: temperature alone on one axis, humidity/battery
         // sharing another - "not_graphed" is a fourth card entity that
-        // isn't flagged as graphed, so it shouldn't show up as a mate.
+        // isn't flagged as graphed, so it shouldn't show up in the group.
         let mut tab = DashboardTab::new("Home", vec![]);
         tab.cards = vec![crate::config::DashboardCard {
             title: Some("Kitchen".into()),
@@ -1586,17 +1598,47 @@ mod tests {
             state("sensor.battery", "92"),
             state("sensor.not_graphed", "1"),
         ];
-        let a = AppState::new(states, Registry::default(), vec![tab]);
+        let mut a = AppState::new(states, Registry::default(), vec![tab]);
 
-        let mates: Vec<&str> = a.card_mates("sensor.temp").iter().map(|e| e.entity_id.as_str()).collect();
+        a.open_detail();
+        let mates: Vec<&str> = a.detail_group().iter().map(|e| e.entity_id.as_str()).collect();
         assert_eq!(mates.len(), 2);
         assert!(mates.contains(&"sensor.humidity"));
         assert!(mates.contains(&"sensor.battery"));
         assert!(!mates.contains(&"sensor.not_graphed"));
 
-        // An entity outside any dashboard card (or not found at all) has
-        // no mates.
-        assert!(a.card_mates("sensor.unknown").is_empty());
+        a.close_detail();
+        assert!(a.detail_group().is_empty());
+    }
+
+    #[test]
+    fn open_detail_groups_with_the_card_actually_on_screen_not_a_same_entity_elsewhere() {
+        // The same entity can be imported into more than one Lovelace
+        // view - e.g. a quick two-sensor "Glance" card, and a fuller room
+        // card elsewhere that also graphs battery. Opening the popup from
+        // the fuller card must group with *its* card-mates, not whichever
+        // card happens to be found first by a search across every tab.
+        let mut glance = DashboardTab::new("Glance", vec![]);
+        glance.cards = vec![crate::config::DashboardCard {
+            title: Some("Quick".into()),
+            entity_ids: vec!["sensor.temp".into(), "sensor.humidity".into()],
+            graph_entity_ids: vec!["sensor.temp".into(), "sensor.humidity".into()],
+        }];
+        let mut full = DashboardTab::new("Home Detailed", vec![]);
+        full.cards = vec![crate::config::DashboardCard {
+            title: Some("Kitchen".into()),
+            entity_ids: vec!["sensor.temp".into(), "sensor.humidity".into(), "sensor.battery".into()],
+            graph_entity_ids: vec!["sensor.temp".into(), "sensor.humidity".into(), "sensor.battery".into()],
+        }];
+        let states = vec![state("sensor.temp", "22"), state("sensor.humidity", "41"), state("sensor.battery", "92")];
+        let mut a = AppState::new(states, Registry::default(), vec![glance, full]);
+
+        // The "Home Detailed" tab (index 1) is the one actually on screen.
+        a.select_group(1);
+        a.open_detail();
+
+        let mates: Vec<&str> = a.detail_group().iter().map(|e| e.entity_id.as_str()).collect();
+        assert!(mates.contains(&"sensor.battery"), "expected battery from the on-screen card, got {mates:?}");
     }
 
     #[test]

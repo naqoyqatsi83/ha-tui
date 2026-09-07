@@ -51,7 +51,7 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
     };
 
     let primary_unit = unit_of(app, entity_id);
-    let mates = app.card_mates(entity_id);
+    let mates = app.detail_group();
     let (same_unit, other_unit): (Vec<&Entity>, Vec<&Entity>) = mates.into_iter().partition(|e| unit_of_entity(e) == primary_unit);
 
     // Every other graphed card-mate's own history, already put on this
@@ -111,6 +111,11 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
         None => Vec::new(),
     };
 
+    // A representative unit for the secondary group's own gutter labels -
+    // same-unit by construction unless a card mixes 3+ units, an edge case
+    // this picks one label for rather than trying to show them all.
+    let secondary_unit = other_unit_series.first().and_then(|(e, _)| unit_of_entity(e));
+
     let has_other_series = !same_unit_series.is_empty() || !rescaled_other.is_empty();
     let mut colors = SERIES_COLORS.iter().cycle();
     let mut datasets = vec![{
@@ -150,10 +155,14 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
     let gutter_width = if secondary_bounds.is_some() { 7u16.min(area.width / 4) } else { 0 };
     let chart_area = Rect { width: area.width.saturating_sub(gutter_width), ..area };
 
+    // Every tick carries its own unit suffix (not just an axis title) so
+    // it's unambiguous which scale a number belongs to even at a glance,
+    // or if a title gets lost behind the legend box.
+    let primary_unit_suffix = primary_unit.clone().unwrap_or_default();
     let y_labels: Vec<String> = (0..y_tick_count)
         .map(|i| {
             let frac = i as f64 / (y_tick_count - 1).max(1) as f64;
-            format!("{:.1}", y_min + frac * (y_max - y_min))
+            format!("{:.1}{primary_unit_suffix}", y_min + frac * (y_max - y_min))
         })
         .collect();
 
@@ -174,7 +183,7 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
         )
         .y_axis(
             Axis::default()
-                .title(if has_other_series { name.to_string() } else { "value".to_string() })
+                .title(primary_unit.clone().unwrap_or_else(|| "value".to_string()))
                 .style(Style::default().fg(theme::BORDER))
                 .bounds([y_min, y_max])
                 .labels(y_labels),
@@ -182,7 +191,7 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
     frame.render_widget(chart, chart_area);
 
     if let Some((sec_min, sec_max)) = secondary_bounds {
-        render_secondary_gutter(frame, area, chart_area, y_tick_count, sec_min, sec_max);
+        render_secondary_gutter(frame, area, chart_area, y_tick_count, sec_min, sec_max, secondary_unit.as_deref());
     }
 }
 
@@ -203,8 +212,9 @@ fn bounds(values: impl Iterator<Item = f64>) -> (f64, f64) {
 /// (left) axis ticks at - mirrors `ratatui::widgets::Chart`'s internal
 /// layout math (border inset, one row for X labels, one for the X axis
 /// line) since the widget doesn't expose where its ticks actually landed.
-fn render_secondary_gutter(frame: &mut Frame, area: Rect, chart_area: Rect, y_tick_count: usize, sec_min: f64, sec_max: f64) {
+fn render_secondary_gutter(frame: &mut Frame, area: Rect, chart_area: Rect, y_tick_count: usize, sec_min: f64, sec_max: f64, unit: Option<&str>) {
     let inner = Block::default().borders(Borders::ALL).inner(chart_area);
+    let unit_suffix = unit.unwrap_or("");
 
     let mut y = inner.bottom().saturating_sub(1);
     if y > inner.top() {
@@ -235,7 +245,14 @@ fn render_secondary_gutter(frame: &mut Frame, area: Rect, chart_area: Rect, y_ti
         let frac = i as f64 / (y_tick_count - 1).max(1) as f64;
         let value = sec_min + frac * (sec_max - sec_min);
         let rect = Rect { x: gutter_x, y: row_y, width: gutter_width, height: 1 };
-        frame.render_widget(Paragraph::new(format!(" {value:.0}")).style(Style::default().fg(theme::TEXT_DIM)), rect);
+        frame.render_widget(Paragraph::new(format!(" {value:.0}{unit_suffix}")).style(Style::default().fg(theme::TEXT_DIM)), rect);
+    }
+
+    // A small header above the ticks names the secondary axis itself,
+    // since (unlike the primary axis) it has no title slot of its own.
+    if !unit_suffix.is_empty() && chart_area.top() < area.bottom() {
+        let header = Rect { x: gutter_x, y: chart_area.top(), width: gutter_width, height: 1 };
+        frame.render_widget(Paragraph::new(format!(" ({unit_suffix})")).style(Style::default().fg(theme::TEXT_DIM).add_modifier(Modifier::BOLD)), header);
     }
 }
 
@@ -293,6 +310,9 @@ mod tests {
         history.insert("sensor.temp".to_string(), vec![(0.0, 20.0), (30.0, 22.0), (60.0, 24.0)]);
         history.insert("sensor.battery".to_string(), vec![(30.0, 92.0)]); // just one point
         app.apply_history(history);
+        // Snapshots the card-mate group (as main.rs does before ever
+        // rendering the popup) - `render` reads it via `detail_group()`.
+        app.open_detail();
 
         // Large enough that `Chart` actually has room to draw its legend
         // (it hides the legend rather than cramming it into a tiny area).
