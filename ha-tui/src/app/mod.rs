@@ -298,10 +298,12 @@ impl AppState {
         self.history.get(entity_id).map(|buf| buf.iter().map(|p| (p.at - oldest, p.value)).collect()).unwrap_or_default()
     }
 
-    /// Other graphed entities from `detail_entity`'s card, snapshotted by
-    /// `open_detail` - e.g. an imported apexcharts-card plotting
+    /// Every graphed entity from `detail_entity`'s card (including
+    /// `detail_entity` itself), snapshotted by `open_detail` in the
+    /// dashboard's own order - e.g. an imported apexcharts-card plotting
     /// temperature alongside humidity and battery, so the detail popup can
-    /// plot them together instead of just the one row that was activated.
+    /// plot them together instead of just the one row that was activated,
+    /// and color them consistently by that same order (see `ui::detail`).
     pub fn detail_group(&self) -> Vec<&Entity> {
         self.detail_group.iter().filter_map(|id| self.entities.get(id)).collect()
     }
@@ -349,14 +351,14 @@ impl AppState {
     /// selected entity. No-op if the selection isn't a graphed entity
     /// (the caller should fall back to toggling it instead).
     ///
-    /// Also snapshots the *other* graphed entities in the same on-screen
-    /// card right now, rather than having the detail popup re-derive them
-    /// later by searching the whole dashboard for "a card containing this
-    /// entity" - the same entity can appear in more than one imported
-    /// Lovelace view (e.g. a quick two-sensor "Glance" card alongside a
-    /// fuller room card that also graphs battery), and a global search
-    /// would risk silently landing on a different, narrower grouping than
-    /// the one actually on screen when the user opened this.
+    /// Also snapshots every graphed entity in the same on-screen card
+    /// (`detail_entity` included) right now, rather than having the detail
+    /// popup re-derive them later by searching the whole dashboard for "a
+    /// card containing this entity" - the same entity can appear in more
+    /// than one imported Lovelace view (e.g. a quick two-sensor "Glance"
+    /// card alongside a fuller room card that also graphs battery), and a
+    /// global search would risk silently landing on a different, narrower
+    /// grouping than the one actually on screen when the user opened this.
     pub fn open_detail(&mut self) {
         let Some(id) = self.selected_entity().map(|e| e.entity_id.clone()) else {
             return;
@@ -371,7 +373,7 @@ impl AppState {
             .map(|c| c.entities)
             .unwrap_or_default()
             .into_iter()
-            .filter(|e| e.entity_id != id && self.graph_entity_ids.contains(&e.entity_id))
+            .filter(|e| self.graph_entity_ids.contains(&e.entity_id))
             .map(|e| e.entity_id.clone())
             .collect();
         self.detail_entity = Some(id);
@@ -1581,11 +1583,10 @@ mod tests {
     }
 
     #[test]
-    fn open_detail_snapshots_other_graphed_entities_from_the_same_card() {
+    fn open_detail_snapshots_every_graphed_entity_from_the_same_card_in_order() {
         // Mirrors an imported apexcharts-card plotting three sensors
-        // together: temperature alone on one axis, humidity/battery
-        // sharing another - "not_graphed" is a fourth card entity that
-        // isn't flagged as graphed, so it shouldn't show up in the group.
+        // together, in this order - "not_graphed" is a fourth card entity
+        // that isn't flagged as graphed, so it shouldn't show up at all.
         let mut tab = DashboardTab::new("Home", vec![]);
         tab.cards = vec![crate::config::DashboardCard {
             title: Some("Kitchen".into()),
@@ -1601,11 +1602,10 @@ mod tests {
         let mut a = AppState::new(states, Registry::default(), vec![tab]);
 
         a.open_detail();
-        let mates: Vec<&str> = a.detail_group().iter().map(|e| e.entity_id.as_str()).collect();
-        assert_eq!(mates.len(), 2);
-        assert!(mates.contains(&"sensor.humidity"));
-        assert!(mates.contains(&"sensor.battery"));
-        assert!(!mates.contains(&"sensor.not_graphed"));
+        let group: Vec<&str> = a.detail_group().iter().map(|e| e.entity_id.as_str()).collect();
+        // `detail_entity` itself is included, in the card's own order, so
+        // a caller can color/index by position without re-deriving it.
+        assert_eq!(group, vec!["sensor.temp", "sensor.humidity", "sensor.battery"]);
 
         a.close_detail();
         assert!(a.detail_group().is_empty());
@@ -1639,6 +1639,31 @@ mod tests {
 
         let mates: Vec<&str> = a.detail_group().iter().map(|e| e.entity_id.as_str()).collect();
         assert!(mates.contains(&"sensor.battery"), "expected battery from the on-screen card, got {mates:?}");
+    }
+
+    #[test]
+    fn open_detail_group_order_is_the_same_regardless_of_which_row_activated_it() {
+        // `ui::detail::color_at` colors a line by its position in this
+        // group - that only gives every entity a consistent color across
+        // popups if the group's order doesn't depend on which row was
+        // actually activated.
+        let mut tab = DashboardTab::new("Home", vec![]);
+        tab.cards = vec![crate::config::DashboardCard {
+            title: Some("Kitchen".into()),
+            entity_ids: vec!["sensor.temp".into(), "sensor.humidity".into(), "sensor.battery".into()],
+            graph_entity_ids: vec!["sensor.temp".into(), "sensor.humidity".into(), "sensor.battery".into()],
+        }];
+        let states = vec![state("sensor.temp", "22"), state("sensor.humidity", "41"), state("sensor.battery", "92")];
+        let mut a = AppState::new(states, Registry::default(), vec![tab]);
+
+        let expected = vec!["sensor.temp", "sensor.humidity", "sensor.battery"];
+        for row in 0..3 {
+            a.selected_row = row;
+            a.open_detail();
+            let group: Vec<&str> = a.detail_group().iter().map(|e| e.entity_id.as_str()).collect();
+            assert_eq!(group, expected, "row {row} activated a differently-ordered group");
+            a.close_detail();
+        }
     }
 
     #[test]

@@ -8,20 +8,25 @@ use super::theme;
 use crate::app::entity::Entity;
 use crate::app::AppState;
 
-/// A measurement's line always gets the same color regardless of chart
-/// position, so temperature/humidity/battery read consistently across
-/// every popup rather than shuffling with whichever row happened to be
-/// activated. Checked against `device_class` first (HA's own controlled
-/// vocabulary), falling back to matching the entity_id/friendly_name for
-/// dashboards that don't set it.
-const TEMPERATURE_COLOR: Color = Color::Rgb(230, 160, 60); // amber/orange
-const HUMIDITY_COLOR: Color = Color::Rgb(90, 160, 220); // blue
-const BATTERY_COLOR: Color = Color::Rgb(210, 90, 90); // red
-/// Cycled for any entity that isn't one of the three recognized kinds
-/// above. The first (green) matches the single-series chart's own
-/// original color, so an unrecognized primary entity with no card-mates
-/// still renders exactly as before.
-const OTHER_COLORS: [Color; 3] = [theme::ON, Color::Rgb(190, 130, 190), Color::Rgb(150, 150, 150)];
+/// Chart line colors assigned by an entity's *position* within its
+/// dashboard card, not by what kind of measurement it is - matching how
+/// an unstyled apexcharts-card (or most charting tools) colors a series
+/// list. As long as a card's entities are listed in the same order (e.g.
+/// temperature, humidity, battery), every popup opened from it colors
+/// them the same way, regardless of which row was actually activated.
+const PALETTE: [Color; 11] = [
+    Color::Rgb(230, 160, 60),  // amber
+    Color::Rgb(90, 160, 220),  // blue
+    Color::Rgb(210, 90, 90),   // red
+    Color::Rgb(150, 100, 200), // violet
+    Color::Rgb(210, 190, 80),  // yellow
+    Color::Rgb(110, 170, 100), // green
+    Color::Rgb(80, 180, 170),  // turquoise
+    Color::Rgb(100, 100, 100), // graphite
+    Color::Rgb(190, 110, 80),  // terracotta
+    Color::Rgb(150, 150, 150), // grey
+    Color::Rgb(60, 140, 140),  // teal
+];
 
 fn unit_of(app: &AppState, entity_id: &str) -> Option<String> {
     app.entities.get(entity_id).and_then(unit_of_entity)
@@ -31,27 +36,13 @@ fn unit_of_entity(entity: &Entity) -> Option<String> {
     entity.as_sensor().and_then(|s| s.unit().map(str::to_string))
 }
 
-/// This entity's chart line color, by recognized measurement kind - not
-/// its position among the chart's datasets.
-fn color_for(entity: &Entity, other_colors: &mut impl Iterator<Item = Color>) -> Color {
-    if let Some(device_class) = entity.attributes.get("device_class").and_then(|v| v.as_str()) {
-        match device_class {
-            "temperature" => return TEMPERATURE_COLOR,
-            "humidity" => return HUMIDITY_COLOR,
-            "battery" => return BATTERY_COLOR,
-            _ => {}
-        }
-    }
-    let haystack = format!("{} {}", entity.entity_id, entity.friendly_name()).to_lowercase();
-    if haystack.contains("temperature") {
-        TEMPERATURE_COLOR
-    } else if haystack.contains("humidity") {
-        HUMIDITY_COLOR
-    } else if haystack.contains("battery") {
-        BATTERY_COLOR
-    } else {
-        other_colors.next().unwrap()
-    }
+/// `entity_id`'s chart line color: its position within `group` (the
+/// on-screen card's full graphed entity list, in the dashboard's own
+/// order - see `AppState::detail_group`) indexes into `PALETTE`, cycling
+/// if the card has more graphed entities than colors.
+fn color_at(group: &[&Entity], entity_id: &str) -> Color {
+    let index = group.iter().position(|e| e.entity_id == entity_id).unwrap_or(0);
+    PALETTE[index % PALETTE.len()]
 }
 
 /// Centered popup with a full X/Y-axis line chart of `entity_id`'s
@@ -89,7 +80,11 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
     let x_max = series.points.last().map(|p| p.0).unwrap_or(0.0);
 
     let primary_unit = unit_of(app, entity_id);
-    let mates = app.detail_group();
+    // The on-screen card's full graphed entity list, in the dashboard's
+    // own order - `color_at` indexes into this so a line's color depends
+    // on its position in the card, not on which row was activated.
+    let group = app.detail_group();
+    let mates: Vec<&Entity> = group.iter().filter(|e| e.entity_id != entity_id).copied().collect();
     let (same_unit, other_unit): (Vec<&Entity>, Vec<&Entity>) = mates.into_iter().partition(|e| unit_of_entity(e) == primary_unit);
 
     // Every other graphed card-mate's own history, already put on this
@@ -158,13 +153,11 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
     let secondary_unit = other_unit_series.first().and_then(|(e, _)| unit_of_entity(e));
 
     let has_other_series = !same_unit_series.is_empty() || !rescaled_other.is_empty();
-    let mut other_colors = OTHER_COLORS.iter().copied().cycle();
     let mut datasets = vec![{
-        let color = app.entities.get(entity_id).map(|e| color_for(e, &mut other_colors)).unwrap_or(theme::ON);
         let mut d = Dataset::default()
             .marker(symbols::Marker::Braille)
             .graph_type(GraphType::Line)
-            .style(Style::default().fg(color))
+            .style(Style::default().fg(color_at(&group, entity_id)))
             .data(&series.points);
         if has_other_series {
             d = d.name(name.to_string());
@@ -176,7 +169,7 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
             Dataset::default()
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(color_for(e, &mut other_colors)))
+                .style(Style::default().fg(color_at(&group, &e.entity_id)))
                 .name(e.friendly_name().to_string())
                 .data(pts),
         );
@@ -186,7 +179,7 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
             Dataset::default()
                 .marker(symbols::Marker::Braille)
                 .graph_type(GraphType::Line)
-                .style(Style::default().fg(color_for(e, &mut other_colors)))
+                .style(Style::default().fg(color_at(&group, &e.entity_id)))
                 .name(e.friendly_name().to_string())
                 .data(pts),
         );
@@ -355,28 +348,27 @@ mod tests {
     }
 
     #[test]
-    fn color_for_recognizes_device_class_regardless_of_name() {
-        let mut others = OTHER_COLORS.iter().copied().cycle();
-        assert_eq!(color_for(&entity("sensor.foo", Some("temperature")), &mut others), TEMPERATURE_COLOR);
-        assert_eq!(color_for(&entity("sensor.bar", Some("humidity")), &mut others), HUMIDITY_COLOR);
-        assert_eq!(color_for(&entity("sensor.baz", Some("battery")), &mut others), BATTERY_COLOR);
+    fn color_at_follows_position_in_the_group_not_measurement_kind() {
+        // Order-based, apexcharts-style: whichever entity is first in the
+        // card's own list gets the first palette color, regardless of
+        // what it actually measures.
+        let battery = entity("sensor.battery", Some("battery"));
+        let temp = entity("sensor.temp", Some("temperature"));
+        let humidity = entity("sensor.humidity", Some("humidity"));
+        let group = vec![&battery, &temp, &humidity];
+
+        assert_eq!(color_at(&group, "sensor.battery"), PALETTE[0]);
+        assert_eq!(color_at(&group, "sensor.temp"), PALETTE[1]);
+        assert_eq!(color_at(&group, "sensor.humidity"), PALETTE[2]);
     }
 
     #[test]
-    fn color_for_falls_back_to_matching_the_entity_id_or_name() {
-        // Mirrors dashboards (like an imported apexcharts-card) whose
-        // series entries don't set `device_class` at all.
-        let mut others = OTHER_COLORS.iter().copied().cycle();
-        assert_eq!(color_for(&entity("sensor.kitchen_ble_temperature", None), &mut others), TEMPERATURE_COLOR);
-        assert_eq!(color_for(&entity("sensor.kitchen_ble_humidity", None), &mut others), HUMIDITY_COLOR);
-        assert_eq!(color_for(&entity("sensor.kitchen_ble_battery", None), &mut others), BATTERY_COLOR);
-    }
-
-    #[test]
-    fn color_for_cycles_the_fallback_palette_for_unrecognized_sensors() {
-        let mut others = OTHER_COLORS.iter().copied().cycle();
-        assert_eq!(color_for(&entity("sensor.co2", None), &mut others), OTHER_COLORS[0]);
-        assert_eq!(color_for(&entity("sensor.pressure", None), &mut others), OTHER_COLORS[1]);
+    fn color_at_cycles_when_a_card_has_more_entities_than_palette_colors() {
+        let entities: Vec<Entity> = (0..PALETTE.len() + 2).map(|i| entity(&format!("sensor.s{i}"), None)).collect();
+        let group: Vec<&Entity> = entities.iter().collect();
+        assert_eq!(color_at(&group, "sensor.s0"), PALETTE[0]);
+        assert_eq!(color_at(&group, &format!("sensor.s{}", PALETTE.len())), PALETTE[0]);
+        assert_eq!(color_at(&group, &format!("sensor.s{}", PALETTE.len() + 1)), PALETTE[1]);
     }
 
     /// A slow-changing sensor like a battery level often has just one
