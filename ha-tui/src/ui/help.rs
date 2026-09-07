@@ -22,6 +22,7 @@ const LINES: &[&str] = &[
     "",
     "mouse: click a row to select it, double-click to toggle/open its chart",
     "mouse: click a tab to switch to it, scroll to move within a panel",
+    "F2             toggle mouse mode off/on (off = normal terminal text selection/copy)",
     "",
     "press any key or click to close",
 ];

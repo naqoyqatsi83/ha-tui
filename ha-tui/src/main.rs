@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{MouseButton, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use ha_tui::app::action::{Action, FilterAction};
 use ha_tui::app::registry::Registry;
 use ha_tui::app::AppState;
@@ -73,6 +73,9 @@ async fn main() -> Result<()> {
     // necessarily the same cell within it) within `DOUBLE_CLICK_WINDOW`
     // activates it instead of just selecting it.
     let mut last_row_click: Option<(Instant, usize, usize)> = None;
+    // F2 toggles this off so the terminal's own text selection/copy works
+    // again - while on, the terminal hands every click to us instead.
+    let mut mouse_enabled = true;
     // Only fires often enough to expire stale optimistic updates / status
     // messages (both on a 5s timeout) - not a general redraw tick.
     let mut expiry_tick = tokio::time::interval(Duration::from_millis(500));
@@ -123,119 +126,140 @@ async fn main() -> Result<()> {
             }
             event = input_rx.recv() => {
                 let Some(event) = event else { break };
-                let Some(app) = &mut app else {
+
+                // Works in any mode (help/detail/filter/connecting) and
+                // regardless of what's selected - it's a terminal-level
+                // mode switch, not an app action, so it's handled before
+                // the "no snapshot yet" early-out below.
+                let is_mouse_toggle =
+                    matches!(event, InputEvent::Key(key) if key.kind == KeyEventKind::Press && key.code == KeyCode::F(2));
+
+                if is_mouse_toggle {
+                    mouse_enabled = !mouse_enabled;
+                    if let Err(err) = terminal::set_mouse_capture(mouse_enabled) {
+                        tracing::warn!(%err, "failed to toggle mouse capture");
+                    }
+                    match &mut app {
+                        Some(app) => app.set_status(if mouse_enabled {
+                            "Mouse mode on (F2 to turn off for terminal text selection/copy)"
+                        } else {
+                            "Mouse mode off - terminal text selection/copy enabled (F2 to turn back on)"
+                        }),
+                        None => dirty = false, // nothing drawn yet to show the status on
+                    }
+                } else if let Some(app) = &mut app {
+                    match event {
+                        InputEvent::Key(key) => {
+                            if app.show_help {
+                                // Any key dismisses the help overlay.
+                                app.close_help();
+                            } else if app.detail_entity().is_some() {
+                                // Any key dismisses the detail chart popup.
+                                app.close_detail();
+                            } else if app.is_filter_editing() {
+                                match FilterAction::from_key(key) {
+                                    Some(FilterAction::Push(c)) => app.filter_push_char(c),
+                                    Some(FilterAction::Backspace) => app.filter_backspace(),
+                                    Some(FilterAction::Confirm) => app.confirm_filter(),
+                                    Some(FilterAction::Cancel) => app.cancel_filter(),
+                                    None => dirty = false,
+                                }
+                            } else {
+                                // Column count must match what the card grid
+                                // actually rendered (a terminal-width-dependent
+                                // layout detail AppState doesn't otherwise
+                                // track) so left/right and the up/down
+                                // panel-jump land on the right neighbor.
+                                let columns = ui::cards::columns_for(tui.size().map(|s| s.width).unwrap_or(80), app.visible_cards().len());
+                                match Action::from_key(key) {
+                                    Some(Action::Quit) => break,
+                                    Some(Action::MoveUp) => app.move_up(columns),
+                                    Some(Action::MoveDown) => app.move_down(columns),
+                                    Some(Action::MoveLeft) => app.move_left(columns),
+                                    Some(Action::MoveRight) => app.move_right(columns),
+                                    Some(Action::NextGroup) => app.next_group(),
+                                    Some(Action::PrevGroup) => app.prev_group(),
+                                    Some(Action::StartFilter) => app.start_filter(),
+                                    Some(Action::ClearFilter) => {
+                                        if app.is_filtering() {
+                                            app.cancel_filter();
+                                        } else {
+                                            dirty = false;
+                                        }
+                                    }
+                                    Some(Action::ShowHelp) => app.toggle_help(),
+                                    Some(Action::Toggle) => {
+                                        dirty = activate_selected(app, &cmd_tx);
+                                    }
+                                    Some(Action::Increase) => match app.adjust_selected(1) {
+                                        Some(cmd) => { let _ = cmd_tx.send(cmd); }
+                                        None => dirty = false,
+                                    },
+                                    Some(Action::Decrease) => match app.adjust_selected(-1) {
+                                        Some(cmd) => { let _ = cmd_tx.send(cmd); }
+                                        None => dirty = false,
+                                    },
+                                    None => dirty = false,
+                                }
+                            }
+                        }
+                        InputEvent::Mouse(mouse) => {
+                            // Crossterm also reports drag/move/release as
+                            // distinct `MouseEventKind`s; only a fresh left
+                            // press and scroll ticks are meaningful here.
+                            // Treating every kind as "any input" (like the key
+                            // handler's overlay-dismiss does) would mean the
+                            // *release* of the very click that just opened the
+                            // detail popup immediately closes it again.
+                            let is_click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+                            let is_scroll = matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown);
+
+                            if !is_click && !is_scroll {
+                                dirty = false;
+                            } else if app.show_help {
+                                app.close_help();
+                            } else if app.detail_entity().is_some() {
+                                app.close_detail();
+                            } else if app.is_filter_editing() {
+                                // The filter text box has no mouse affordances.
+                                dirty = false;
+                            } else if is_scroll {
+                                let columns = ui::cards::columns_for(tui.size().map(|s| s.width).unwrap_or(80), app.visible_cards().len());
+                                match mouse.kind {
+                                    MouseEventKind::ScrollUp => app.move_up(columns),
+                                    MouseEventKind::ScrollDown => app.move_down(columns),
+                                    _ => unreachable!("is_scroll only matches these two kinds"),
+                                }
+                            } else {
+                                let pos = Position { x: mouse.column, y: mouse.row };
+                                if let Some(tab) = hits.tabs.iter().find(|t| t.area.contains(pos)) {
+                                    // Dashboard/room switching: a single click
+                                    // acts immediately, no double-click needed.
+                                    app.select_group(tab.index);
+                                } else if let Some(hit) = hits.rows.iter().find(|h| h.area.contains(pos)) {
+                                    app.select(hit.card, hit.row);
+                                    let is_double_click = last_row_click
+                                        .is_some_and(|(at, card, row)| card == hit.card && row == hit.row && at.elapsed() < DOUBLE_CLICK_WINDOW);
+                                    if is_double_click {
+                                        dirty = activate_selected(app, &cmd_tx);
+                                        last_row_click = None;
+                                    } else {
+                                        last_row_click = Some((Instant::now(), hit.card, hit.row));
+                                    }
+                                } else {
+                                    dirty = false;
+                                }
+                            }
+                        }
+                    }
+                } else {
                     // No snapshot yet (still on the "Connecting..." screen)
                     // - still quittable via keyboard, everything else
                     // (including all mouse activity) is a no-op.
                     if matches!(event, InputEvent::Key(key) if Action::from_key(key) == Some(Action::Quit)) {
                         break;
                     }
-                    continue;
-                };
-
-                match event {
-                    InputEvent::Key(key) => {
-                        if app.show_help {
-                            // Any key dismisses the help overlay.
-                            app.close_help();
-                        } else if app.detail_entity().is_some() {
-                            // Any key dismisses the detail chart popup.
-                            app.close_detail();
-                        } else if app.is_filter_editing() {
-                            match FilterAction::from_key(key) {
-                                Some(FilterAction::Push(c)) => app.filter_push_char(c),
-                                Some(FilterAction::Backspace) => app.filter_backspace(),
-                                Some(FilterAction::Confirm) => app.confirm_filter(),
-                                Some(FilterAction::Cancel) => app.cancel_filter(),
-                                None => dirty = false,
-                            }
-                        } else {
-                            // Column count must match what the card grid
-                            // actually rendered (a terminal-width-dependent
-                            // layout detail AppState doesn't otherwise
-                            // track) so left/right and the up/down
-                            // panel-jump land on the right neighbor.
-                            let columns = ui::cards::columns_for(tui.size().map(|s| s.width).unwrap_or(80), app.visible_cards().len());
-                            match Action::from_key(key) {
-                                Some(Action::Quit) => break,
-                                Some(Action::MoveUp) => app.move_up(columns),
-                                Some(Action::MoveDown) => app.move_down(columns),
-                                Some(Action::MoveLeft) => app.move_left(columns),
-                                Some(Action::MoveRight) => app.move_right(columns),
-                                Some(Action::NextGroup) => app.next_group(),
-                                Some(Action::PrevGroup) => app.prev_group(),
-                                Some(Action::StartFilter) => app.start_filter(),
-                                Some(Action::ClearFilter) => {
-                                    if app.is_filtering() {
-                                        app.cancel_filter();
-                                    } else {
-                                        dirty = false;
-                                    }
-                                }
-                                Some(Action::ShowHelp) => app.toggle_help(),
-                                Some(Action::Toggle) => {
-                                    dirty = activate_selected(app, &cmd_tx);
-                                }
-                                Some(Action::Increase) => match app.adjust_selected(1) {
-                                    Some(cmd) => { let _ = cmd_tx.send(cmd); }
-                                    None => dirty = false,
-                                },
-                                Some(Action::Decrease) => match app.adjust_selected(-1) {
-                                    Some(cmd) => { let _ = cmd_tx.send(cmd); }
-                                    None => dirty = false,
-                                },
-                                None => dirty = false,
-                            }
-                        }
-                    }
-                    InputEvent::Mouse(mouse) => {
-                        // Crossterm also reports drag/move/release as
-                        // distinct `MouseEventKind`s; only a fresh left
-                        // press and scroll ticks are meaningful here.
-                        // Treating every kind as "any input" (like the key
-                        // handler's overlay-dismiss does) would mean the
-                        // *release* of the very click that just opened the
-                        // detail popup immediately closes it again.
-                        let is_click = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
-                        let is_scroll = matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown);
-
-                        if !is_click && !is_scroll {
-                            dirty = false;
-                        } else if app.show_help {
-                            app.close_help();
-                        } else if app.detail_entity().is_some() {
-                            app.close_detail();
-                        } else if app.is_filter_editing() {
-                            // The filter text box has no mouse affordances.
-                            dirty = false;
-                        } else if is_scroll {
-                            let columns = ui::cards::columns_for(tui.size().map(|s| s.width).unwrap_or(80), app.visible_cards().len());
-                            match mouse.kind {
-                                MouseEventKind::ScrollUp => app.move_up(columns),
-                                MouseEventKind::ScrollDown => app.move_down(columns),
-                                _ => unreachable!("is_scroll only matches these two kinds"),
-                            }
-                        } else {
-                            let pos = Position { x: mouse.column, y: mouse.row };
-                            if let Some(tab) = hits.tabs.iter().find(|t| t.area.contains(pos)) {
-                                // Dashboard/room switching: a single click
-                                // acts immediately, no double-click needed.
-                                app.select_group(tab.index);
-                            } else if let Some(hit) = hits.rows.iter().find(|h| h.area.contains(pos)) {
-                                app.select(hit.card, hit.row);
-                                let is_double_click = last_row_click
-                                    .is_some_and(|(at, card, row)| card == hit.card && row == hit.row && at.elapsed() < DOUBLE_CLICK_WINDOW);
-                                if is_double_click {
-                                    dirty = activate_selected(app, &cmd_tx);
-                                    last_row_click = None;
-                                } else {
-                                    last_row_click = Some((Instant::now(), hit.card, hit.row));
-                                }
-                            } else {
-                                dirty = false;
-                            }
-                        }
-                    }
+                    dirty = false;
                 }
             }
             _ = expiry_tick.tick() => {

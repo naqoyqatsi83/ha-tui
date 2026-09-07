@@ -43,6 +43,7 @@ No web server, no browser, no polling REST endpoints. Just a single binary and a
 - **Live state, live control** — entity states update in real time over the WebSocket event stream; toggle switches, lights, and other controllable entities directly from the grid
 - **History sparklines** — numeric sensors render an inline sparkline pulled from `history/history_during_period`; press `Enter` on a card for a full detail popup with a real time-axis chart
 - **2D panel navigation** — arrow keys move through the card grid spatially (up/down/left/right), not just in list order
+- **Mouse support** — click a tab to switch dashboards, click a row to select it, double-click to activate it (toggle, or open its history chart), scroll to move within a panel; `F2` turns mouse capture off/on so normal terminal text selection/copy still works when you need it
 - **Multi-dashboard tabs** — switch between views (Overview, Network, Climate, whatever your Lovelace config defines) with animated tab transitions
 - **Smart title grouping** — cards sharing a common leading word (e.g. multiple `Washer: ...` sensors) are grouped under one panel title automatically
 - **Masonry & sections layouts** — understands both classic Lovelace `cards` and the newer `sections` dashboard format
@@ -89,10 +90,11 @@ Never commit a real config file — it contains your access token. Treat it like
 | Key | Action |
 |-----|--------|
 | `q` | Quit |
-| `Tab` / `←` `→` | Switch dashboard tab |
-| `↑` `↓` `←` `→` | Navigate the card grid |
-| `Enter` | Activate entity / open detail popup |
+| `Tab` / `←` `→` / click a tab | Switch dashboard tab |
+| `↑` `↓` `←` `→` / click a row / scroll | Navigate / select in the card grid |
+| `Enter` / double-click | Activate entity / open detail popup |
 | `Esc` | Close popup |
+| `F2` | Toggle mouse mode off/on (off restores normal terminal text selection/copy) |
 | `?` | Help overlay |
 
 ## How It Works

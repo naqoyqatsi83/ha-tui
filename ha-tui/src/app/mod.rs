@@ -303,7 +303,7 @@ impl AppState {
         self.status.as_ref().map(|(message, _)| message.as_str())
     }
 
-    fn set_status(&mut self, message: impl Into<String>) {
+    pub fn set_status(&mut self, message: impl Into<String>) {
         self.status = Some((message.into(), Instant::now()));
     }
 

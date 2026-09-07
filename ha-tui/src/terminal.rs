@@ -46,3 +46,16 @@ fn restore_terminal() -> Result<()> {
     execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen)?;
     Ok(())
 }
+
+/// Turns the terminal's mouse reporting on or off at runtime (bound to a
+/// hotkey in `main`) - with it off, clicks and drags go back to the
+/// terminal's own text selection instead of being captured as app input, so
+/// the user can copy text out of the TUI.
+pub fn set_mouse_capture(enabled: bool) -> Result<()> {
+    if enabled {
+        execute!(io::stdout(), EnableMouseCapture)?;
+    } else {
+        execute!(io::stdout(), DisableMouseCapture)?;
+    }
+    Ok(())
+}
