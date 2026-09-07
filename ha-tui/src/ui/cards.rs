@@ -175,6 +175,16 @@ fn render_card(
             rect,
         );
     }
+
+    // Rows share the grid row's height with whichever card in it has the
+    // most entities, so a shorter card is left with blank space below its
+    // own last row (and the "N more" indicator line, if any) - map a click
+    // there to the last visible entity instead of leaving it a dead zone.
+    let content_bottom = inner.y + inner.height;
+    if end > start && y < content_bottom {
+        let filler = Rect { x: inner.x, y, width: inner.width, height: content_bottom - y };
+        hits.push(RowHit { area: filler, card: card_idx, row: end - 1 });
+    }
 }
 
 fn render_entity_row(frame: &mut Frame, area: Rect, entity: &Entity, app: &AppState, selected: bool, name_width: usize) {
@@ -261,6 +271,60 @@ fn row_style(entity: &Entity, app: &AppState) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::registry::Registry;
+    use crate::config::{DashboardCard, DashboardTab};
+    use crate::ha::StateObject;
+    use ratatui::layout::Position;
+    use ratatui::Terminal;
+
+    fn state(entity_id: &str) -> StateObject {
+        serde_json::from_value(serde_json::json!({
+            "entity_id": entity_id,
+            "state": "on",
+            "attributes": {},
+            "last_updated": null,
+            "last_changed": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_click_in_a_shorter_panels_filler_space_hits_its_last_row() {
+        // Two cards side by side in the same grid row share that row's
+        // height (set by the taller one) - "Short" (1 entity) ends up with
+        // blank space below its own single row, since "Tall" (4 entities)
+        // needs the extra height.
+        let mut tab = DashboardTab::new("Tab", vec![]);
+        tab.cards = vec![
+            DashboardCard {
+                title: Some("Short".into()),
+                entity_ids: vec!["light.a".into()],
+                ..Default::default()
+            },
+            DashboardCard {
+                title: Some("Tall".into()),
+                entity_ids: vec!["light.b".into(), "light.c".into(), "light.d".into(), "light.e".into()],
+                ..Default::default()
+            },
+        ];
+        let states = vec!["light.a", "light.b", "light.c", "light.d", "light.e"].into_iter().map(state).collect();
+        let app = AppState::new(states, Registry::default(), vec![tab]);
+
+        let backend = ratatui::backend::TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let area = Rect { x: 0, y: 0, width: 80, height: 20 };
+        let mut hits = Vec::new();
+        terminal.draw(|frame| hits = render(frame, area, &app)).unwrap();
+
+        let short_row = hits.iter().find(|h| h.card == 0 && h.row == 0).expect("Short card's own row");
+        // One line below the short card's only row - still inside its
+        // (row-height-matched) panel border, not on the bottom border
+        // itself, since the "Tall" card needs 4 content rows.
+        let filler_point = Position { x: short_row.area.x, y: short_row.area.y + short_row.area.height };
+        let filler_hit = hits.iter().find(|h| h.area.contains(filler_point)).expect("filler space should still hit something, not fall through");
+        assert_eq!(filler_hit.card, 0);
+        assert_eq!(filler_hit.row, 0);
+    }
 
     #[test]
     fn resample_stretches_fewer_points_to_fill_the_width() {
