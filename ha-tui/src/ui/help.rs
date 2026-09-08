@@ -1,5 +1,5 @@
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
@@ -36,8 +36,8 @@ pub fn render(frame: &mut Frame) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Keybindings ")
-        .title_style(Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))
+        .border_set(theme::PANEL_BORDER)
+        .title(theme::badge(" Keybindings ", theme::ACCENT))
         .border_style(Style::default().fg(theme::ACCENT));
 
     let text = LINES.join("\n");

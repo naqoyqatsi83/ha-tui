@@ -64,8 +64,8 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
     let Some(series) = app.history_series(entity_id) else {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(title)
-            .title_style(Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))
+            .border_set(theme::PANEL_BORDER)
+            .title(theme::badge(title, theme::ACCENT))
             .border_style(Style::default().fg(theme::ACCENT));
         let message = Paragraph::new("Not enough history yet - keep the app open a little longer.")
             .style(Style::default().fg(theme::TEXT_DIM))
@@ -203,8 +203,8 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(title)
-        .title_style(Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))
+        .border_set(theme::PANEL_BORDER)
+        .title(theme::badge(title, theme::ACCENT))
         .border_style(Style::default().fg(theme::ACCENT));
 
     let chart = Chart::new(datasets)
