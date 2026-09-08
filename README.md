@@ -155,6 +155,13 @@ src/
     └── theme.rs             # Colors and styling
 ```
 
+## Changelog
+
+- Panels, popups, and the help overlay now share an exabind-inspired frame:
+  chunky corner wedges, thin border lines, and a solid badge-style title —
+  in place of ratatui's default uniform box borders. Screenshots above
+  updated to match.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
