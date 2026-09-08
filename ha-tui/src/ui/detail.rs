@@ -232,6 +232,16 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
     frame.render_widget(chart, chart_area);
 
     if let Some((sec_min, sec_max)) = secondary_bounds {
+        // Close the frame around the gutter too (top/bottom/right only -
+        // the chart's own right border already forms its left edge), so
+        // it reads as part of this popup instead of floating outside it
+        // and getting lost against whatever card sits behind the popup.
+        let gutter_frame = Rect { x: chart_area.right(), y: area.y, width: gutter_width, height: area.height };
+        let gutter_block = Block::default()
+            .borders(Borders::TOP | Borders::BOTTOM | Borders::RIGHT)
+            .border_set(theme::PANEL_BORDER)
+            .border_style(Style::default().fg(theme::ACCENT));
+        frame.render_widget(gutter_block, gutter_frame);
         render_secondary_gutter(frame, area, chart_area, y_tick_count, sec_min, sec_max, secondary_unit.as_deref());
     }
 }
