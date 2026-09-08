@@ -18,3 +18,7 @@ pub const HIGHLIGHT_FG: Color = Color::Rgb(30, 26, 20);
 /// Subtle background tint for the whole selected panel, so it reads as
 /// "focused" even before you look at which row is highlighted inside it.
 pub const PANEL_SELECTED_BG: Color = Color::Rgb(46, 40, 30);
+/// Near-black base a panel's title badge text sits on (see
+/// `ui::cards::render_card`) - deliberately not pure black, so it still
+/// reads as part of this palette rather than a hard cutout.
+pub const CRUST: Color = Color::Rgb(24, 21, 16);

@@ -1,5 +1,7 @@
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
+use ratatui::symbols::border;
+use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
 use ratatui::Frame;
 
@@ -12,6 +14,21 @@ const TARGET_CARD_WIDTH: u16 = 28;
 const MAX_COLUMNS: usize = 5;
 const MIN_CARD_HEIGHT: u16 = 3;
 const MAX_CARD_HEIGHT: u16 = 12;
+
+/// A panel's frame: chunky filled wedges at the top corners with thin
+/// one-eighth-block lines everywhere else, instead of uniform box-drawing
+/// characters - the look exabind (https://github.com/junkdog/exabind)
+/// uses for its own panels.
+const PANEL_BORDER: border::Set = border::Set {
+    top_left: "\u{259f}",
+    top_right: "\u{259c}",
+    bottom_left: "\u{2594}",
+    bottom_right: "\u{2594}",
+    vertical_left: "\u{258f}",
+    vertical_right: "\u{2595}",
+    horizontal_top: "\u{2594}",
+    horizontal_bottom: "\u{2594}",
+};
 
 /// How many panels the grid currently lays out per row for `width` and
 /// `card_count` panels - shared with `AppState`'s left/right navigation so
@@ -98,11 +115,17 @@ fn render_card(
 ) {
     let is_selected_panel = selected_row.is_some();
     let title = card.title.clone().unwrap_or_default();
+    let border_color = if is_selected_panel { theme::ACCENT } else { theme::BORDER };
+    // The title is a solid badge, not colored text sitting on the border
+    // line: normal fg/bg styling flipped with REVERSED, so the badge's
+    // visible background is `border_color` and the text cuts through in
+    // the panel's own dark base - same technique exabind's panels use.
+    let title_badge = Span::styled(format!(" {title} "), Style::default().fg(border_color).bg(theme::CRUST).add_modifier(Modifier::BOLD | Modifier::REVERSED));
     let mut block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" {title} "))
-        .title_style(Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))
-        .border_style(Style::default().fg(if is_selected_panel { theme::ACCENT } else { theme::BORDER }));
+        .border_set(PANEL_BORDER)
+        .title(title_badge)
+        .border_style(Style::default().fg(border_color));
     if is_selected_panel {
         // Tints the whole panel (border + interior) so the focused panel
         // reads clearly even before spotting which row inside it is lit -
