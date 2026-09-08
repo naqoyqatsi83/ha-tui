@@ -142,6 +142,10 @@ pub struct AppState {
     /// entity_id of a graphed entity currently shown in the detail chart
     /// popup (opened via Enter on a graphed row), if any.
     detail_entity: Option<String>,
+    /// `detail_entity`'s on-screen card's own title (e.g. a room name),
+    /// snapshotted alongside `detail_group` - lets the popup say *which*
+    /// card a multi-entity chart came from, not just the entity name.
+    detail_card_title: Option<String>,
     /// Other graphed entities from `detail_entity`'s on-screen card at the
     /// moment it was opened - see `open_detail`.
     detail_group: Vec<String>,
@@ -177,6 +181,7 @@ impl AppState {
             selected_row: 0,
             show_help: false,
             detail_entity: None,
+            detail_card_title: None,
             detail_group: Vec::new(),
             dashboard,
             filter: None,
@@ -366,22 +371,31 @@ impl AppState {
         if !self.graph_entity_ids.contains(&id) {
             return;
         }
-        self.detail_group = self
+        // Collected into owned values before touching `self` again - the
+        // card borrows `self.entities` for as long as it's alive, which
+        // would otherwise conflict with assigning the fields below.
+        let (card_title, group): (Option<String>, Vec<String>) = self
             .visible_cards()
             .into_iter()
             .nth(self.selected_position().0)
-            .map(|c| c.entities)
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|e| self.graph_entity_ids.contains(&e.entity_id))
-            .map(|e| e.entity_id.clone())
-            .collect();
+            .map(|c| (c.title, c.entities.into_iter().map(|e| e.entity_id.clone()).collect::<Vec<_>>()))
+            .unwrap_or_default();
+
+        self.detail_card_title = card_title;
+        self.detail_group = group.into_iter().filter(|eid| self.graph_entity_ids.contains(eid)).collect();
         self.detail_entity = Some(id);
     }
 
     pub fn close_detail(&mut self) {
         self.detail_entity = None;
+        self.detail_card_title = None;
         self.detail_group.clear();
+    }
+
+    /// The on-screen card's own title `detail_entity` was opened from
+    /// (e.g. a room name), if that card has one.
+    pub fn detail_card_title(&self) -> Option<&str> {
+        self.detail_card_title.as_deref()
     }
 
     pub fn detail_entity(&self) -> Option<&str> {
@@ -1606,9 +1620,11 @@ mod tests {
         // `detail_entity` itself is included, in the card's own order, so
         // a caller can color/index by position without re-deriving it.
         assert_eq!(group, vec!["sensor.temp", "sensor.humidity", "sensor.battery"]);
+        assert_eq!(a.detail_card_title(), Some("Kitchen"));
 
         a.close_detail();
         assert!(a.detail_group().is_empty());
+        assert_eq!(a.detail_card_title(), None);
     }
 
     #[test]

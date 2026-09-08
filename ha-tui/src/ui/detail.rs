@@ -59,7 +59,13 @@ pub fn render(frame: &mut Frame, app: &AppState, entity_id: &str) {
 
     let name = app.entities.get(entity_id).map(|e| e.friendly_name()).unwrap_or(entity_id);
     let current = app.entities.get(entity_id).map(|e| app.display_state(e)).unwrap_or_default();
-    let title = format!(" {name} - {current}  (any key to close) ");
+    // Prefix the card's own title (e.g. a room name) when it has one and
+    // isn't already redundant with the entity's own name - a multi-entity
+    // chart otherwise gives no clue which card it was opened from.
+    let title = match app.detail_card_title() {
+        Some(card_title) if !card_title.is_empty() && card_title != name => format!(" {card_title} \u{2022} {name} - {current}  (any key to close) "),
+        _ => format!(" {name} - {current}  (any key to close) "),
+    };
 
     let Some(series) = app.history_series(entity_id) else {
         let block = Block::default()
